@@ -1,0 +1,1 @@
+./configure --enable-gpl --disable-asm --extra-ldflags="-lstdc++" --extra-cflags="-fno-stack-check" && make -j 8

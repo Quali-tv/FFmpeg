@@ -1,0 +1,14 @@
+{
+    "editor.formatOnSave": true,
+    "C_Cpp.clang_format_fallbackStyle": "Google",
+    "C_Cpp.clang_format_style": "Google",
+    "files.associations": {
+        "__threading_support": "c",
+        "memory": "c",
+        "optional": "c",
+        "type_traits": "c",
+        "utility": "c",
+        "vector": "c",
+        "__node_handle": "c"
+    }
+}
