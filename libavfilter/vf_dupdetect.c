@@ -24,6 +24,7 @@
  */
 
 #include <float.h>
+#include <math.h>
 
 #include "avfilter.h"
 #include "internal.h"
@@ -108,6 +109,9 @@ typedef struct DuplicateDetectContext {
   int64_t duplicate_max_duration;  ///< maximum duration of duplicate, expressed
   ///< in timebase units
 
+  int64_t duplicate_fail_distance;
+  int64_t duplicate_fail_allowance;
+
   int64_t duplicate_source_start;
   int64_t duplicate_start;  ///< pts start time of the first black picture
   int64_t duplicate_end;    ///< pts end time of the last black picture
@@ -120,8 +124,10 @@ typedef struct DuplicateDetectContext {
   AVRational frame_rate;
   checksum_ctx *counter;
 
+  double *weights;
+
   int frame_size;
-  uint16_t *frame;
+  double *frame;
   int nb_frames;
   int frame_index;
 } DuplicateDetectContext;
@@ -130,13 +136,22 @@ typedef struct DuplicateDetectContext {
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption dupdetect_options[] = {
+    {"fd",
+     "set allowed duplicate failures in frames. this allows misses while "
+     "matching",
+     OFFSET(duplicate_fail_allowance),
+     AV_OPT_TYPE_INT,
+     {.i64 = 5},
+     0,
+     INT_MAX,
+     FLAGS},
     {"wd",
      "set window duration in frames",
      OFFSET(nb_frames),
      AV_OPT_TYPE_INT,
      {.i64 = 5},
      0,
-     DBL_MAX,
+     INT_MAX,
      FLAGS},
     {"duplicate_window_duration",
      "set window duration in frames",
@@ -144,7 +159,7 @@ static const AVOption dupdetect_options[] = {
      AV_OPT_TYPE_INT,
      {.i64 = 5},
      0,
-     DBL_MAX,
+     INT_MAX,
      FLAGS},
     {"mind",
      "set minimum detected black duration in seconds",
@@ -207,15 +222,28 @@ static int query_formats(AVFilterContext *ctx) {
   return ff_set_common_formats(ctx, fmts_list);
 }
 
-static int round_to_nearest(int n, int nearest) {
-  const int a = (n / nearest) * nearest;
-  const int b = a + nearest;
+static int64_t round_to_nearest(int64_t n, int64_t nearest) {
+  const int64_t a = (n / nearest) * nearest;
+  const int64_t b = a + nearest;
   return (n - a > b - n) ? b : a;
 }
 
 static int config_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
   DuplicateDetectContext *s = ctx->priv;
+  const int w2 = inlink->w >> 1;
+  const int h2 = inlink->h >> 1;
+
+  s->weights = av_mallocz(inlink->w * inlink->h * sizeof(*s->weights));
+  if (!s->weights) return AVERROR(ENOMEM);
+
+  for (int y = 0, i = 0; y < inlink->h; y++) {
+    const double y_weight = (h2 - fabs((1.0 * h2) - y)) / h2;
+    for (int x = 0; x < inlink->w; x++, ++i) {
+      const double x_weight = (w2 - fabs((1.0 * w2) - x)) / w2;
+      s->weights[i] = y_weight * x_weight;
+    }
+  }
 
   s->time_base = inlink->time_base;
   s->frame_rate = inlink->frame_rate;
@@ -228,8 +256,7 @@ static int config_input(AVFilterLink *inlink) {
   s->counter = av_mallocz(sizeof(*s->counter));
   if (!s->counter) return AVERROR(ENOMEM);
 
-  s->frame_size =
-      ((inlink->w * inlink->h) >> FRAME_PIXEL_COMPRESSION_LEVEL) + 1;
+  s->frame_size = (FRAME_PIXEL_COMPRESSION_LEVEL + 1) * sizeof(double);
   s->frame = av_calloc(s->frame_size * s->nb_frames, sizeof(*s->frame));
   if (!s->frame) return AVERROR(ENOMEM);
 
@@ -270,7 +297,7 @@ static int tree_cmp(const void *a, const void *b) {
   if (!a_val) return 1;
   if (!b_val) return -1;
 
-  return memcmp(a_val, b_val, 4 * sizeof(uint64_t));
+  return memcmp(a_val, b_val, 2 * sizeof(uint64_t));
 }
 
 static int tree_insert(DuplicateDetectContext *s, struct AVTreeNode **rootp,
@@ -421,7 +448,6 @@ static int update_rolling_sum(DuplicateDetectContext *s, checksum_ctx *c,
 
   MurmurHash3_x64_128(buf, buf_len, 0xdeadbeef, hash);
 
-  // if (c->last_hash[0] != hash[0] || c->last_hash[1] != hash[1]) {
   if (prev_buf) {
     node = c->head;
     if (node) {
@@ -446,9 +472,6 @@ static int update_rolling_sum(DuplicateDetectContext *s, checksum_ctx *c,
     c->tail->next = node;
     c->tail = node;
   }
-  /*}  else if (prev_buf) {
-     look_for_hash = 1;
-   }*/
 
   if (look_for_hash) {
     total_hash[0] = 0x13;
@@ -481,25 +504,29 @@ static int duplicate_counter(AVFilterContext *ctx, AVFrame *in,
   const int w = in->width;
   const int h = in->height;
   const int frame_index = s->frame_index % s->nb_frames;
-  uint16_t *frame = &s->frame[frame_index * s->frame_size];
-  int duplicate_possible = 1;
-  int local_duplicate_found = 0;
+  double *frame = &s->frame[frame_index * s->frame_size];
 
-  memset(frame, 0xffff, s->frame_size * sizeof(*frame));
+  memset(frame, 0x0, s->frame_size * sizeof(*frame));
 
   const uint8_t *p = in->data[0];
-  for (int y = 0; y < h; y++) {
-    const int line_offset = (y * linesize) >> FRAME_PIXEL_COMPRESSION_LEVEL;
-    for (int x = 0; x < w; x++) {
-      frame[line_offset + (x >> FRAME_PIXEL_COMPRESSION_LEVEL)] =
-          round_to_nearest(p[x], 128);
+  for (int y = 0, i = 0; y < h; y++) {
+    for (int x = 0; x < w; x++, ++i) {
+      frame[i % FRAME_PIXEL_COMPRESSION_LEVEL] += s->weights[i] * p[x];
     }
     p += linesize;
   }
 
+  for (int i = 0; i < (s->frame_size - 1); ++i) {
+    const int64_t clamped_frame_value =
+        round_to_nearest((int64_t)round(frame[i]), 4096);
+    // av_log(s, AV_LOG_INFO, "n:%d frame[i]:%f clamped_frame[i]:%lld\n", n,
+    // frame[i], clamped_frame_value);
+    frame[i] = clamped_frame_value;
+  }
+
   {
     checksum_ctx *c = s->counter;
-    uint16_t *prev_frame = NULL;
+    double *prev_frame = NULL;
     int64_t pts = in->pts;
 
     if (c->frame_count >= c->frame_depth) {
@@ -507,16 +534,12 @@ static int duplicate_counter(AVFilterContext *ctx, AVFrame *in,
       prev_frame = &s->frame[prev_frame_index % s->nb_frames];
     }
 
-    local_duplicate_found = update_rolling_sum(
-        s, c, &pts, (unsigned char *)frame, (unsigned char *)prev_frame,
-        s->frame_size * sizeof(*frame));
-
-    if (duplicate_possible && local_duplicate_found) {
+    if (update_rolling_sum(s, c, &pts, (unsigned char *)frame,
+                           (unsigned char *)prev_frame,
+                           (s->frame_size - 1) * sizeof(*frame))) {
       *duplicate_detected = 1;
       *duplicate_frame_pts_offset = c->frame_pts_offset;
       *duplicate_source_pts = pts;
-    } else {
-      duplicate_possible = 0;
     }
   }
 
@@ -536,25 +559,34 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
 
   if (duplicate_detected) {
     if (!s->duplicate_started) {
-      s->duplicate_started = 1;
-      s->duplicate_start = picref->pts - duplicate_frame_pts_offset;
-      s->duplicate_source_start =
-          duplicate_source_pts - duplicate_frame_pts_offset;
+      if ((picref->pts - duplicate_source_pts) >= s->duplicate_min_duration) {
+        s->duplicate_started = 1;
+        s->duplicate_start = picref->pts - duplicate_frame_pts_offset;
+        s->duplicate_source_start =
+            duplicate_source_pts - duplicate_frame_pts_offset;
 
-      av_dict_set(&picref->metadata, "lavfi.duplicate_start",
-                  av_ts2timestr(s->duplicate_start, &s->time_base), 0);
+        av_dict_set(&picref->metadata, "lavfi.duplicate_start",
+                    av_ts2timestr(s->duplicate_start, &s->time_base), 0);
 
-      av_log(s, AV_LOG_VERBOSE, "duplicate pts:%s start:%s source:%s\n",
-             av_ts2timestr(picref->pts, &s->time_base),
-             av_ts2timestr(s->duplicate_start, &s->time_base),
-             av_ts2timestr(s->duplicate_source_start, &s->time_base));
+        av_log(s, AV_LOG_VERBOSE, "duplicate pts:%s start:%s source:%s\n",
+               av_ts2timestr(picref->pts, &s->time_base),
+               av_ts2timestr(s->duplicate_start, &s->time_base),
+               av_ts2timestr(s->duplicate_source_start, &s->time_base));
+      }
     }
+
+    s->duplicate_fail_distance = s->duplicate_fail_allowance;
   } else if (s->duplicate_started) {
-    s->duplicate_started = 0;
-    s->duplicate_end = picref->pts;
-    check_duplicate_end(ctx);
-    av_dict_set(&picref->metadata, "lavfi.duplicate_end",
-                av_ts2timestr(s->duplicate_end, &s->time_base), 0);
+    if (s->duplicate_fail_distance-- == 0) {
+      s->duplicate_started = 0;
+      s->duplicate_end =
+          picref->pts - (s->duplicate_fail_allowance / av_q2d(s->frame_rate) /
+                         av_q2d(s->time_base));
+
+      check_duplicate_end(ctx);
+      av_dict_set(&picref->metadata, "lavfi.duplicate_end",
+                  av_ts2timestr(s->duplicate_end, &s->time_base), 0);
+    }
   }
 
   s->last_picref_pts = picref->pts;
@@ -567,8 +599,6 @@ static av_cold void uninit(AVFilterContext *ctx) {
   av_freep(&s->counter);
 
   if (s->duplicate_started) {
-    // FIXME: duplicate_end should be set to last_picref_pts +
-    // last_picref_duration
     s->duplicate_end = s->last_picref_pts;
     check_duplicate_end(ctx);
   }
