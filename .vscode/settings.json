@@ -11,6 +11,15 @@
         "vector": "c",
         "__node_handle": "c",
         "cmath": "c",
-        "chrono": "c"
+        "chrono": "c",
+        "__bit_reference": "c",
+        "__functional_base": "c",
+        "algorithm": "c",
+        "__memory": "c",
+        "functional": "c",
+        "iterator": "c",
+        "limits": "c",
+        "ratio": "c",
+        "tuple": "c"
     }
 }

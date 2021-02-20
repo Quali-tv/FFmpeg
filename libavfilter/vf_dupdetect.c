@@ -33,7 +33,9 @@
 #include "libavutil/timestamp.h"
 #include "libavutil/tree.h"
 
-#define FRAME_PIXEL_COMPRESSION_LEVEL 8
+#define FRAME_PIXEL_COMPRESSION_LEVEL 32
+#define MAX_FRAMES 32
+#define SCAN_DEPTH 13
 
 #define FORCE_INLINE inline __attribute__((always_inline))
 
@@ -84,18 +86,21 @@ FORCE_INLINE uint64_t fmix64(uint64_t k) {
 }
 
 typedef struct hash_node {
-  uint64_t value[2];
+  int64_t value[2];
   struct hash_node *next;
 } hash_node;
 
-typedef struct checksum_ctx {
+typedef struct hash_list {
   hash_node *head;
   hash_node *tail;
-  uint64_t last_hash[2];
-  uint64_t frame_count;
-  uint64_t frame_depth;
+} hash_list;
+
+typedef struct checksum_ctx {
+  hash_list *list[SCAN_DEPTH];
+  int64_t frame_count;
+  int64_t frame_depth;
   int64_t frame_pts_offset;
-  struct AVTreeNode *lut;
+  struct AVTreeNode *lut[SCAN_DEPTH];
 } checksum_ctx;
 
 typedef struct DuplicateDetectContext {
@@ -112,6 +117,7 @@ typedef struct DuplicateDetectContext {
   int64_t duplicate_fail_distance;
   int64_t duplicate_fail_allowance;
 
+  int64_t duplicate_index;
   int64_t duplicate_source_start;
   int64_t duplicate_start;  ///< pts start time of the first black picture
   int64_t duplicate_end;    ///< pts end time of the last black picture
@@ -123,7 +129,7 @@ typedef struct DuplicateDetectContext {
   AVRational time_base;
   AVRational frame_rate;
   checksum_ctx *counter;
-
+  hash_list *blacklist;
   double *weights;
 
   int frame_size;
@@ -228,6 +234,12 @@ static int64_t round_to_nearest(int64_t n, int64_t nearest) {
   return (n - a > b - n) ? b : a;
 }
 
+static int interval_intersects(int64_t a, int64_t b, int64_t c, int64_t d) {
+  if (a >= c && a <= d) return 1;
+  if (c >= a && c <= b) return 1;
+  return 0;
+}
+
 static int config_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
   DuplicateDetectContext *s = ctx->priv;
@@ -256,7 +268,15 @@ static int config_input(AVFilterLink *inlink) {
   s->counter = av_mallocz(sizeof(*s->counter));
   if (!s->counter) return AVERROR(ENOMEM);
 
-  s->frame_size = (FRAME_PIXEL_COMPRESSION_LEVEL + 1) * sizeof(double);
+  for (int i = 0; i < SCAN_DEPTH; ++i) {
+    s->counter->list[i] = av_mallocz(sizeof(*s->counter->list[i]));
+    if (!s->counter->list[i]) return AVERROR(ENOMEM);
+  }
+
+  s->blacklist = av_mallocz(sizeof(*s->blacklist));
+  if (!s->blacklist) return AVERROR(ENOMEM);
+
+  s->frame_size = FRAME_PIXEL_COMPRESSION_LEVEL;
   s->frame = av_calloc(s->frame_size * s->nb_frames, sizeof(*s->frame));
   if (!s->frame) return AVERROR(ENOMEM);
 
@@ -276,16 +296,95 @@ static int config_input(AVFilterLink *inlink) {
 
 static void check_duplicate_end(AVFilterContext *ctx) {
   DuplicateDetectContext *s = ctx->priv;
+  int should_blacklist = 0;
+
   const int64_t duplicate_duration = (s->duplicate_end - s->duplicate_start);
-  if (duplicate_duration >= s->duplicate_min_duration &&
-      duplicate_duration <= s->duplicate_max_duration) {
-    av_log(
-        s, AV_LOG_INFO,
-        "duplicate_start:%s duplicate_end:%s duplicate_duration:%s source:%s\n",
-        av_ts2timestr(s->duplicate_start, &s->time_base),
-        av_ts2timestr(s->duplicate_end, &s->time_base),
-        av_ts2timestr(s->duplicate_end - s->duplicate_start, &s->time_base),
-        av_ts2timestr(s->duplicate_source_start, &s->time_base));
+  if (duplicate_duration >= s->duplicate_min_duration) {
+    // local loop or freeze
+    if (((duplicate_duration << 1) + s->duplicate_source_start) >=
+        s->duplicate_start) {
+      should_blacklist = 1;
+      av_log(
+          s, AV_LOG_VERBOSE,
+          "BLACKLIST: Reason: Local loop detected. duplicate_start:%s "
+          "duplicate_end:%s duplicate_duration:%s source:%s\n",
+          av_ts2timestr(s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_end, &s->time_base),
+          av_ts2timestr(s->duplicate_end - s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_source_start, &s->time_base));
+    } else {
+      // check previous intervals
+      hash_node *p = s->blacklist->head;
+      while (p) {
+        if (interval_intersects(s->duplicate_start, s->duplicate_end,
+                                p->value[0], p->value[1]) ||
+            interval_intersects(s->duplicate_source_start,
+                                s->duplicate_source_start + duplicate_duration,
+                                p->value[0], p->value[1])) {
+          should_blacklist = 1;
+          av_log(s, AV_LOG_VERBOSE,
+                 "BLACKLIST: Reason: Found in previous blacklist interval. "
+                 "duplicate_start:%s duplicate_end:%s duplicate_duration:%s "
+                 "source:%s\n",
+                 av_ts2timestr(s->duplicate_start, &s->time_base),
+                 av_ts2timestr(s->duplicate_end, &s->time_base),
+                 av_ts2timestr(s->duplicate_end - s->duplicate_start,
+                               &s->time_base),
+                 av_ts2timestr(s->duplicate_source_start, &s->time_base));
+
+          // shouldn't be possible; here just in case
+          const int64_t interval_duplicate_duration =
+              duplicate_duration - (s->duplicate_start - p->value[0]);
+          if (interval_duplicate_duration > (p->value[1] - p->value[0])) {
+            av_log(s, AV_LOG_VERBOSE,
+                   "BLACKLIST: Extending interval duration from %lld to %lld\n",
+                   (p->value[1] - p->value[0]), interval_duplicate_duration);
+            p->value[1] = p->value[0] + interval_duplicate_duration;
+          }
+          break;
+        }
+        p = p->next;
+      }
+    }
+  }
+
+  if (should_blacklist) {
+    hash_node *node = av_mallocz(sizeof(hash_node));
+
+    node->value[0] = s->duplicate_start;
+    node->value[1] = s->duplicate_end;
+
+    if (!s->blacklist->head) {
+      s->blacklist->head = node;
+      s->blacklist->tail = node;
+    } else {
+      s->blacklist->tail->next = node;
+      s->blacklist->tail = node;
+    }
+  } else {
+    if (duplicate_duration >= s->duplicate_min_duration &&
+        duplicate_duration <= s->duplicate_max_duration) {
+      av_log(
+          s, AV_LOG_INFO,
+          "index:%lld duplicate_start:%s duplicate_end:%s "
+          "duplicate_duration:%s "
+          "source:%s\n",
+          s->duplicate_index++,
+          av_ts2timestr(s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_end, &s->time_base),
+          av_ts2timestr(s->duplicate_end - s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_source_start, &s->time_base));
+    } else if (duplicate_duration > s->duplicate_max_duration) {
+      av_log(
+          s, AV_LOG_ERROR,
+          "LARGE DUPLICATE: duplicate_start:%s duplicate_end:%s "
+          "duplicate_duration:%s "
+          "source:%s\n",
+          av_ts2timestr(s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_end, &s->time_base),
+          av_ts2timestr(s->duplicate_end - s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_source_start, &s->time_base));
+    }
   }
 }
 
@@ -438,59 +537,68 @@ static void MurmurHash3_x64_128(const void *key, const int len,
 }
 
 static int update_rolling_sum(DuplicateDetectContext *s, checksum_ctx *c,
-                              int64_t *pts, unsigned char *buf,
-                              unsigned char *prev_buf, int buf_len) {
+                              int64_t *pts, double *frame, double *prev_frame,
+                              int frame_len) {
   int result = 0;
-  int look_for_hash = 0;
-  struct hash_node *node = NULL;
-  uint64_t hash[2];
-  uint64_t total_hash[2];
+  int64_t temp_frame[MAX_FRAMES];
 
-  MurmurHash3_x64_128(buf, buf_len, 0xdeadbeef, hash);
+  for (int i = 0; i < SCAN_DEPTH; ++i) {
+    int look_for_hash = 0;
+    struct hash_node *node = NULL;
+    uint64_t hash[2];
+    uint64_t total_hash[2];
 
-  if (prev_buf) {
-    node = c->head;
-    if (node) {
-      c->head = node->next;
-      node->next = NULL;
+    for (int j = 0; j < frame_len; ++j) {
+      const int64_t clamped_frame_value =
+          round_to_nearest((int64_t)frame[j], 1 << i);
+      temp_frame[j] = clamped_frame_value;
+    }
+
+    MurmurHash3_x64_128(temp_frame, frame_len * sizeof(*temp_frame), 0xdeadbeef,
+                        hash);
+
+    if (prev_frame) {
+      node = c->list[i]->head;
+      if (node) {
+        c->list[i]->head = node->next;
+        node->next = NULL;
+      } else {
+        c->list[i]->head = NULL;
+        c->list[i]->tail = NULL;
+      }
+      look_for_hash = 1;
+    }
+
+    if (!node) node = av_mallocz(sizeof(hash_node));
+
+    node->value[0] = hash[0];
+    node->value[1] = hash[1];
+
+    if (!c->list[i]->head) {
+      c->list[i]->head = node;
+      c->list[i]->tail = node;
     } else {
-      c->head = NULL;
-      c->tail = NULL;
-    }
-    look_for_hash = 1;
-  }
-
-  if (!node) node = av_mallocz(sizeof(hash_node));
-
-  node->value[0] = hash[0];
-  node->value[1] = hash[1];
-
-  if (!c->head) {
-    c->head = node;
-    c->tail = node;
-  } else {
-    c->tail->next = node;
-    c->tail = node;
-  }
-
-  if (look_for_hash) {
-    total_hash[0] = 0x13;
-    total_hash[1] = 0x7fffffff;
-
-    struct hash_node *p = c->head;
-    while (p) {
-      total_hash[0] = total_hash[0] * 524287 + p->value[0];
-      total_hash[1] = total_hash[0] * 524287 + p->value[1];
-      p = p->next;
+      c->list[i]->tail->next = node;
+      c->list[i]->tail = node;
     }
 
-    if (!tree_insert(s, &c->lut, total_hash, hash, pts)) {
-      result = 1;
+    if (look_for_hash) {
+      total_hash[0] = 0x13;
+      total_hash[1] = 0x7fffffff;
+
+      struct hash_node *p = c->list[i]->head;
+      while (p) {
+        total_hash[0] = total_hash[0] * 524287 + p->value[0];
+        total_hash[1] = total_hash[1] * 524287 + p->value[1];
+        p = p->next;
+      }
+
+      if (!tree_insert(s, &c->lut[i], total_hash, hash, pts)) {
+        result = 1;
+      }
     }
   }
 
-  c->last_hash[0] = hash[0];
-  c->last_hash[1] = hash[1];
   c->frame_count++;
   return result;
 }
@@ -516,14 +624,6 @@ static int duplicate_counter(AVFilterContext *ctx, AVFrame *in,
     p += linesize;
   }
 
-  for (int i = 0; i < (s->frame_size - 1); ++i) {
-    const int64_t clamped_frame_value =
-        round_to_nearest((int64_t)round(frame[i]), 4096);
-    // av_log(s, AV_LOG_INFO, "n:%d frame[i]:%f clamped_frame[i]:%lld\n", n,
-    // frame[i], clamped_frame_value);
-    frame[i] = clamped_frame_value;
-  }
-
   {
     checksum_ctx *c = s->counter;
     double *prev_frame = NULL;
@@ -534,9 +634,7 @@ static int duplicate_counter(AVFilterContext *ctx, AVFrame *in,
       prev_frame = &s->frame[prev_frame_index % s->nb_frames];
     }
 
-    if (update_rolling_sum(s, c, &pts, (unsigned char *)frame,
-                           (unsigned char *)prev_frame,
-                           (s->frame_size - 1) * sizeof(*frame))) {
+    if (update_rolling_sum(s, c, &pts, frame, prev_frame, s->frame_size)) {
       *duplicate_detected = 1;
       *duplicate_frame_pts_offset = c->frame_pts_offset;
       *duplicate_source_pts = pts;
