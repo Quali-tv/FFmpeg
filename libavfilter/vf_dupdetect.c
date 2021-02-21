@@ -28,14 +28,18 @@
 
 #include "avfilter.h"
 #include "internal.h"
+#include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/timestamp.h"
 #include "libavutil/tree.h"
+#include "scene_sad.h"
 
 #define FRAME_PIXEL_COMPRESSION_LEVEL 32
 #define MAX_FRAMES 32
 #define SCAN_DEPTH 13
+#define MIN_SCENE_SCORE .7
+#define LAST_SCENE_THRESHOLD 15
 
 #define FORCE_INLINE inline __attribute__((always_inline))
 
@@ -136,6 +140,20 @@ typedef struct DuplicateDetectContext {
   double *frame;
   int nb_frames;
   int frame_index;
+
+  // scene detection
+  hash_list *scene_list;
+  int bit_depth;
+  int nb_planes;
+  ptrdiff_t width[4];
+  ptrdiff_t height[4];
+  ff_scene_sad_fn
+      sad;  ///< Sum of the absolute difference function (scene detect only)
+  double prev_mafd;  ///< previous MAFD                           (scene detect
+                     ///< only)
+  AVFrame *prev_picref;  ///< previous frame                          (scene
+  ///< detect only)
+  double last_scene_time;
 } DuplicateDetectContext;
 
 #define OFFSET(x) offsetof(DuplicateDetectContext, x)
@@ -240,11 +258,55 @@ static int interval_intersects(int64_t a, int64_t b, int64_t c, int64_t d) {
   return 0;
 }
 
+static int add_node_to_list(hash_list *list, const int64_t a, const int64_t b) {
+  hash_node *node = av_mallocz(sizeof(hash_node));
+  if (!node) return AVERROR(ENOMEM);
+
+  node->value[0] = a;
+  node->value[1] = b;
+
+  if (!list->head) {
+    list->head = node;
+    list->tail = node;
+  } else {
+    list->tail->next = node;
+    list->tail = node;
+  }
+  return 0;
+}
+
 static int config_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
   DuplicateDetectContext *s = ctx->priv;
+
+  const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
   const int w2 = inlink->w >> 1;
   const int h2 = inlink->h >> 1;
+  const int is_yuv = !(desc->flags & AV_PIX_FMT_FLAG_RGB) &&
+                     (desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
+                     desc->nb_components >= 3;
+
+  s->bit_depth = desc->comp[0].depth;
+  s->nb_planes = is_yuv ? 1 : av_pix_fmt_count_planes(inlink->format);
+
+  for (int plane = 0; plane < s->nb_planes; plane++) {
+    const ptrdiff_t line_size =
+        av_image_get_linesize(inlink->format, inlink->w, plane);
+    const int vsub = desc->log2_chroma_h;
+
+    s->width[plane] = line_size >> (s->bit_depth > 8);
+    s->height[plane] =
+        plane == 1 || plane == 2 ? AV_CEIL_RSHIFT(inlink->h, vsub) : inlink->h;
+  }
+
+  s->sad = ff_scene_sad_get_fn(s->bit_depth == 8 ? 8 : 16);
+  if (!s->sad) return AVERROR(EINVAL);
+
+  s->scene_list = av_mallocz(sizeof(*s->scene_list));
+  if (!s->scene_list)
+    return AVERROR(ENOMEM);
+  else
+    add_node_to_list(s->scene_list, 0, 0);
 
   s->weights = av_mallocz(inlink->w * inlink->h * sizeof(*s->weights));
   if (!s->weights) return AVERROR(ENOMEM);
@@ -294,6 +356,48 @@ static int config_input(AVFilterLink *inlink) {
   return 0;
 }
 
+static double get_scene_score(AVFilterContext *ctx, AVFrame *frame) {
+  double ret = 0;
+  DuplicateDetectContext *s = ctx->priv;
+  AVFrame *prev_picref = s->prev_picref;
+
+  if (prev_picref && frame->height == prev_picref->height &&
+      frame->width == prev_picref->width) {
+    uint64_t sad = 0;
+    double mafd, diff;
+    uint64_t count = 0;
+
+    for (int plane = 0; plane < s->nb_planes; plane++) {
+      uint64_t plane_sad;
+      s->sad(prev_picref->data[plane], prev_picref->linesize[plane],
+             frame->data[plane], frame->linesize[plane], s->width[plane],
+             s->height[plane], &plane_sad);
+      sad += plane_sad;
+      count += s->width[plane] * s->height[plane];
+    }
+
+    emms_c();
+    mafd = (double)sad / count / (1ULL << (s->bit_depth - 8));
+    diff = fabs(mafd - s->prev_mafd);
+    ret = av_clipf(FFMIN(mafd, diff) / 100., 0, 1);
+    s->prev_mafd = mafd;
+    av_frame_free(&prev_picref);
+  }
+  s->prev_picref = av_frame_clone(frame);
+  return ret;
+}
+
+static int is_in_suspected_ad_section(const hash_list *list, double pts) {
+  int result = 0;
+  hash_node *p = list->head;
+  while (p) {
+    if (p->value[0] < pts) break;
+    result = p->value[1];
+    p = p->next;
+  }
+  return result;
+}
+
 static void check_duplicate_end(AVFilterContext *ctx) {
   DuplicateDetectContext *s = ctx->priv;
   int should_blacklist = 0;
@@ -307,6 +411,19 @@ static void check_duplicate_end(AVFilterContext *ctx) {
       av_log(
           s, AV_LOG_VERBOSE,
           "BLACKLIST: Reason: Local loop detected. duplicate_start:%s "
+          "duplicate_end:%s duplicate_duration:%s source:%s\n",
+          av_ts2timestr(s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_end, &s->time_base),
+          av_ts2timestr(s->duplicate_end - s->duplicate_start, &s->time_base),
+          av_ts2timestr(s->duplicate_source_start, &s->time_base));
+    } else if (!is_in_suspected_ad_section(
+                   s->scene_list,
+                   s->duplicate_source_start * av_q2d(s->time_base))) {
+      should_blacklist = 1;
+      av_log(
+          s, AV_LOG_VERBOSE,
+          "BLACKLIST: Reason: Source was not in a likely ad section detected. "
+          "duplicate_start:%s "
           "duplicate_end:%s duplicate_duration:%s source:%s\n",
           av_ts2timestr(s->duplicate_start, &s->time_base),
           av_ts2timestr(s->duplicate_end, &s->time_base),
@@ -349,18 +466,7 @@ static void check_duplicate_end(AVFilterContext *ctx) {
   }
 
   if (should_blacklist) {
-    hash_node *node = av_mallocz(sizeof(hash_node));
-
-    node->value[0] = s->duplicate_start;
-    node->value[1] = s->duplicate_end;
-
-    if (!s->blacklist->head) {
-      s->blacklist->head = node;
-      s->blacklist->tail = node;
-    } else {
-      s->blacklist->tail->next = node;
-      s->blacklist->tail = node;
-    }
+    add_node_to_list(s->blacklist, s->duplicate_start, s->duplicate_end);
   } else {
     if (duplicate_duration >= s->duplicate_min_duration &&
         duplicate_duration <= s->duplicate_max_duration) {
@@ -561,7 +667,7 @@ static int update_rolling_sum(DuplicateDetectContext *s, checksum_ctx *c,
       node = c->list[i]->head;
       if (node) {
         c->list[i]->head = node->next;
-        node->next = NULL;
+        av_free(node);
       } else {
         c->list[i]->head = NULL;
         c->list[i]->tail = NULL;
@@ -569,18 +675,7 @@ static int update_rolling_sum(DuplicateDetectContext *s, checksum_ctx *c,
       look_for_hash = 1;
     }
 
-    if (!node) node = av_mallocz(sizeof(hash_node));
-
-    node->value[0] = hash[0];
-    node->value[1] = hash[1];
-
-    if (!c->list[i]->head) {
-      c->list[i]->head = node;
-      c->list[i]->tail = node;
-    } else {
-      c->list[i]->tail->next = node;
-      c->list[i]->tail = node;
-    }
+    add_node_to_list(c->list[i], hash[0], hash[1]);
 
     if (look_for_hash) {
       total_hash[0] = 0x13;
@@ -651,6 +746,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
   int duplicate_detected = 0;
   int duplicate_frame_pts_offset = 0;
   int64_t duplicate_source_pts = 0;
+  double scene_score;
+
+  scene_score = get_scene_score(ctx, picref);
+  if (scene_score >= MIN_SCENE_SCORE) {
+    const double pic_pts = picref->pts * av_q2d(s->time_base);
+    add_node_to_list(
+        s->scene_list, picref->pts,
+        (pic_pts - s->last_scene_time < LAST_SCENE_THRESHOLD) ? 1 : 0);
+    s->last_scene_time = pic_pts;
+
+    av_log(s, AV_LOG_VERBOSE, "scene detected: %s score: %f pts: %f\n",
+           av_ts2timestr(picref->pts, &s->time_base), scene_score, pic_pts);
+  }
 
   duplicate_counter(ctx, picref, &duplicate_detected,
                     &duplicate_frame_pts_offset, &duplicate_source_pts);

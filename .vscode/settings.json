@@ -20,6 +20,7 @@
         "iterator": "c",
         "limits": "c",
         "ratio": "c",
-        "tuple": "c"
+        "tuple": "c",
+        "scene_sad.h": "c"
     }
 }
