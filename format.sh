@@ -1,1 +1,1 @@
-clang-format -i libavfilter/vf_dupdetect.c
+clang-format -i libavfilter/vf_addetect.c

@@ -166,3 +166,13 @@ void av_tree_enumerate(AVTreeNode *t, void *opaque,
             av_tree_enumerate(t->child[1], opaque, cmp, enu);
     }
 }
+
+void av_tree_enumerate_2(AVTreeNode *t, void *opaque,
+                       int (*enu)(void *opaque, void *elem))
+{
+    if (t) {
+        av_tree_enumerate_2(t->child[0], opaque,  enu);
+        enu(opaque, t->elem);
+        av_tree_enumerate_2(t->child[1], opaque,  enu);
+    }
+}
