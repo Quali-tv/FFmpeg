@@ -123,6 +123,19 @@ static int query_formats(AVFilterContext *ctx) {
   return ff_set_common_formats(ctx, fmts_list);
 }
 
+static int clear_list(AdDetectContext *s, list *list) {
+  list_node *p = list->head;
+  while (p) {
+    list_node *s = p;
+    p = p->next;
+    av_free(s);
+  }
+
+  list->head = NULL;
+  list->tail = NULL;
+  return 0;
+}
+
 static int add_node_to_list(AdDetectContext *s, list *list, const double pts,
                             const int likely_was_in_ad) {
   list_node *node = av_mallocz(sizeof(list_node));
@@ -220,7 +233,6 @@ static void check_ad_end(AVFilterContext *ctx) {
   AdDetectContext *s = ctx->priv;
 
   const double ad_duration = (s->ad_end - s->ad_start) * av_q2d(s->time_base);
-  // av_log(s, AV_LOG_INFO, "ad_duration:%f\n", ad_duration);
   if (ad_duration >= s->ad_min_duration && ad_duration <= s->ad_max_duration) {
     av_log(s, AV_LOG_INFO,
            "index:%lld ad_start:%s ad_end:%s "
@@ -274,6 +286,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
 
       av_dict_set(&picref->metadata, "lavfi.ad_end",
                   av_ts2timestr(s->ad_end, &s->time_base), 0);
+
+      clear_list(s, s->scene_list);
     }
 
     add_node_to_list(s, s->scene_list, picref->pts, 0);
