@@ -23,6 +23,8 @@
  * Video ad range detector
  */
 
+#include "vf_addetect.h"
+
 #include <float.h>
 #include <math.h>
 
@@ -34,6 +36,9 @@
 #include "libavutil/timestamp.h"
 #include "libavutil/tree.h"
 #include "scene_sad.h"
+
+double last_ad_start = 0.0;
+double last_ad_duration = 0.0;
 
 typedef struct list_node {
   double pts;
@@ -234,6 +239,8 @@ static void check_ad_end(AVFilterContext *ctx) {
 
   const double ad_duration = (s->ad_end - s->ad_start) * av_q2d(s->time_base);
   if (ad_duration >= s->ad_min_duration && ad_duration <= s->ad_max_duration) {
+    last_ad_start = s->ad_start * av_q2d(s->time_base);
+    last_ad_duration = ad_duration;
     av_log(s, AV_LOG_INFO,
            "index:%lld ad_start:%s ad_end:%s "
            "ad_duration:%f\n",

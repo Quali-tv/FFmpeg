@@ -778,7 +778,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
 
         if (of->waiting_for_min_mux_queue && of->total_muxing_queue_size > of->min_muxing_queue_size) {
             of->waiting_for_min_mux_queue = 0;
-            av_log(NULL, AV_LOG_ERROR, "Done mux waiting! total_muxing_queue_size: %d min_muxing_queue_size: %d\n",
+            av_log(NULL, AV_LOG_INFO, "Done mux waiting! total_muxing_queue_size: %d min_muxing_queue_size: %d\n",
                 of->total_muxing_queue_size, of->min_muxing_queue_size);
         }
 
@@ -3060,7 +3060,6 @@ static int check_init_output_file(OutputFile *of, int file_index)
     //assert_avoptions(of->opts);
     of->header_written = 1;
 
-    av_log(NULL, AV_LOG_INFO, "Min muxing queue size: %d total size %d\n", of->min_muxing_queue_size, of->total_muxing_queue_size);
     av_dump_format(of->ctx, file_index, of->ctx->url, 1);
     nb_output_dumped++;
 

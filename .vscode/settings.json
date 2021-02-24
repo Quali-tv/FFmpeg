@@ -22,6 +22,9 @@
         "ratio": "c",
         "tuple": "c",
         "scene_sad.h": "c",
-        "typeinfo": "c"
+        "typeinfo": "c",
+        "hlsplaylist.h": "c",
+        "internal.h": "c",
+        "bprint.h": "c"
     }
 }
