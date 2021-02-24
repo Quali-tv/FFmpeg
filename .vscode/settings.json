@@ -21,6 +21,7 @@
         "limits": "c",
         "ratio": "c",
         "tuple": "c",
-        "scene_sad.h": "c"
+        "scene_sad.h": "c",
+        "typeinfo": "c"
     }
 }

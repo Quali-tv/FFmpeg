@@ -87,6 +87,7 @@ static const char *const opt_name_fix_sub_duration[]          = {"fix_sub_durati
 static const char *const opt_name_canvas_sizes[]              = {"canvas_size", NULL};
 static const char *const opt_name_pass[]                      = {"pass", NULL};
 static const char *const opt_name_passlogfiles[]              = {"passlogfile", NULL};
+static const char *const opt_name_min_muxing_queue_size[]     = {"min_muxing_queue_size", NULL};
 static const char *const opt_name_max_muxing_queue_size[]     = {"max_muxing_queue_size", NULL};
 static const char *const opt_name_muxing_queue_data_threshold[] = {"muxing_queue_data_threshold", NULL};
 static const char *const opt_name_guess_layout_max[]          = {"guess_layout_max", NULL};
@@ -230,6 +231,7 @@ static void init_options(OptionsContext *o)
     o->start_time_eof = AV_NOPTS_VALUE;
     o->recording_time = INT64_MAX;
     o->limit_filesize = UINT64_MAX;
+    o->min_muxing_queue_size = 0;
     o->chapters_input_file = INT_MAX;
     o->accurate_seek  = 1;
     o->thread_queue_size = -1;
@@ -2185,6 +2187,9 @@ static int open_output_file(OptionsContext *o, const char *filename)
     of->recording_time = o->recording_time;
     of->start_time     = o->start_time;
     of->limit_filesize = o->limit_filesize;
+    of->min_muxing_queue_size = o->min_muxing_queue_size->u.i;
+    of->total_muxing_queue_size = 0;
+    of->waiting_for_min_mux_queue = of->min_muxing_queue_size > 0;
     of->shortest       = o->shortest;
     av_dict_copy(&of->opts, o->g->format_opts, 0);
 
@@ -3794,6 +3799,8 @@ const OptionDef options[] = {
     { "fpre", HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,                { .func_arg = opt_preset },
         "set options from indicated preset file", "filename" },
 
+    { "min_muxing_queue_size", HAS_ARG | OPT_INT | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT, { .off = OFFSET(min_muxing_queue_size) },
+        "minimum number of packets that will be buffered before muxing", "packets" },
     { "max_muxing_queue_size", HAS_ARG | OPT_INT | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT, { .off = OFFSET(max_muxing_queue_size) },
         "maximum number of packets that can be buffered while waiting for all streams to initialize", "packets" },
     { "muxing_queue_data_threshold", HAS_ARG | OPT_INT | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT, { .off = OFFSET(muxing_queue_data_threshold) },
