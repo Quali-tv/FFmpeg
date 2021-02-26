@@ -3041,21 +3041,28 @@ static int compare_int64(const void *a, const void *b)
 
 static void flush_muxing_queues(OutputFile *of, int try_improve_time_base) 
 {
+    int something_done;
     /* flush the muxing queues */
-    for (int i = 0; i < of->ctx->nb_streams; i++) {
-        OutputStream *ost = output_streams[of->ost_index + i];
+    do
+    {
+        something_done = 0;
+        for (int i = 0; i < of->ctx->nb_streams; i++) {
+            OutputStream *ost = output_streams[of->ost_index + i];
 
-        /* try to improve muxing time_base (only possible if nothing has been written yet) */
-        if (try_improve_time_base && !av_fifo_size(ost->muxing_queue))
-            ost->mux_timebase = ost->st->time_base;
+            /* try to improve muxing time_base (only possible if nothing has been written yet) */
+            if (try_improve_time_base && !av_fifo_size(ost->muxing_queue))
+                ost->mux_timebase = ost->st->time_base;
 
-        while (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
-            AVPacket pkt;
-            av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
-            ost->muxing_queue_data_size -= pkt.size;
-            write_packet(of, &pkt, ost, 1);
+            if (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
+                AVPacket pkt;
+                av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
+                ost->muxing_queue_data_size -= pkt.size;
+                write_packet(of, &pkt, ost, 1);
+                something_done = 1;
+            }
         }
-    }
+        try_improve_time_base = 0;
+    } while (something_done);
 }
 
 /* open the muxer when all the streams are initialized */
