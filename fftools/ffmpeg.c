@@ -777,23 +777,8 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
             of->total_muxing_queue_size += tmp_pkt.size;
         }
 
-        if (of->waiting_for_min_mux_queue && of->total_muxing_queue_size > of->min_muxing_queue_size) {
-            of->waiting_for_min_mux_queue = 0;
-            av_log(NULL, AV_LOG_INFO, "Done mux waiting! total_muxing_queue_size: %d min_muxing_queue_size: %d\n",
-                of->total_muxing_queue_size, of->min_muxing_queue_size);
-        }
-
         av_fifo_generic_write(ost->muxing_queue, &tmp_pkt, sizeof(tmp_pkt), NULL);
         return;
-    } else if (av_fifo_size(ost->muxing_queue)) {
-        AVPacket tmp_pkt = {0};
-        ret = av_packet_make_refcounted(pkt);
-        if (ret < 0)
-            exit_program(1);
-        av_packet_move_ref(&tmp_pkt, pkt);
-        av_fifo_generic_write(ost->muxing_queue, &tmp_pkt, sizeof(tmp_pkt), NULL);
-
-        av_fifo_generic_read(ost->muxing_queue, pkt, sizeof(*pkt), NULL);
     }
 
     if ((st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_sync_method == VSYNC_DROP) ||
@@ -3042,6 +3027,14 @@ static int compare_int64(const void *a, const void *b)
 static void flush_muxing_queues(OutputFile *of, int try_improve_time_base) 
 {
     int something_done;
+
+    if (of->waiting_for_min_mux_queue && of->total_muxing_queue_size > of->min_muxing_queue_size)
+    {
+        of->waiting_for_min_mux_queue = 0;
+        av_log(NULL, AV_LOG_INFO, "Done with mux waiting! total_muxing_queue_size: %d min_muxing_queue_size: %d\n",
+            of->total_muxing_queue_size, of->min_muxing_queue_size);
+    }
+
     /* flush the muxing queues */
     do
     {
@@ -3053,7 +3046,8 @@ static void flush_muxing_queues(OutputFile *of, int try_improve_time_base)
             if (try_improve_time_base && !av_fifo_size(ost->muxing_queue))
                 ost->mux_timebase = ost->st->time_base;
 
-            if (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
+            if (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) 
+            {
                 AVPacket pkt;
                 av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
                 ost->muxing_queue_data_size -= pkt.size;
@@ -3061,7 +3055,6 @@ static void flush_muxing_queues(OutputFile *of, int try_improve_time_base)
                 something_done = 1;
             }
         }
-        try_improve_time_base = 0;
     } while (something_done);
 }
 
