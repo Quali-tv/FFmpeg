@@ -130,6 +130,7 @@ static void do_video_stats(OutputStream *ost, int frame_size);
 static BenchmarkTimeStamps get_benchmark_time_stamps(void);
 static int64_t getmaxrss(void);
 static int ifilter_has_all_input_formats(FilterGraph *fg);
+static void flush_muxing_queues(OutputFile *of, int try_improve_time_base);
 
 static int run_as_daemon  = 0;
 static int nb_frames_dup = 0;
@@ -1594,7 +1595,9 @@ static int reap_filters(int flush)
 
             av_frame_unref(filtered_frame);
         }
-    }
+
+        flush_muxing_queues(of, 0);
+    }    
 
     return 0;
 }
@@ -3036,6 +3039,25 @@ static int compare_int64(const void *a, const void *b)
     return FFDIFFSIGN(*(const int64_t *)a, *(const int64_t *)b);
 }
 
+static void flush_muxing_queues(OutputFile *of, int try_improve_time_base) 
+{
+    /* flush the muxing queues */
+    for (int i = 0; i < of->ctx->nb_streams; i++) {
+        OutputStream *ost = output_streams[of->ost_index + i];
+
+        /* try to improve muxing time_base (only possible if nothing has been written yet) */
+        if (try_improve_time_base && !av_fifo_size(ost->muxing_queue))
+            ost->mux_timebase = ost->st->time_base;
+
+        while (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
+            AVPacket pkt;
+            av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
+            ost->muxing_queue_data_size -= pkt.size;
+            write_packet(of, &pkt, ost, 1);
+        }
+    }
+}
+
 /* open the muxer when all the streams are initialized */
 static int check_init_output_file(OutputFile *of, int file_index)
 {
@@ -3066,22 +3088,7 @@ static int check_init_output_file(OutputFile *of, int file_index)
     if (sdp_filename || want_sdp)
         print_sdp();
 
-    /* flush the muxing queues */
-    for (i = 0; i < of->ctx->nb_streams; i++) {
-        OutputStream *ost = output_streams[of->ost_index + i];
-
-        /* try to improve muxing time_base (only possible if nothing has been written yet) */
-        if (!av_fifo_size(ost->muxing_queue))
-            ost->mux_timebase = ost->st->time_base;
-
-        while (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
-            AVPacket pkt;
-            av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
-            ost->muxing_queue_data_size -= pkt.size;
-            write_packet(of, &pkt, ost, 1);
-        }
-    }
-
+    flush_muxing_queues(of, 1);
     return 0;
 }
 
