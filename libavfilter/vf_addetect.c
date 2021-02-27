@@ -59,11 +59,12 @@ typedef struct AdDetectContext {
   double ad_min_duration;
   double ad_max_duration;
 
+  int ad_id;
+  int ad_started;
   int64_t ad_start;
   int64_t ad_end;
   int64_t last_picref_pts;
   int64_t last_scene_pts;
-  int ad_started;
   int64_t ad_index;
 
   AVRational time_base;
@@ -242,15 +243,21 @@ static void check_ad_end(AVFilterContext *ctx) {
     last_ad_start = s->ad_start * av_q2d(s->time_base);
     last_ad_duration = ad_duration;
     av_log(s, AV_LOG_INFO,
-           "index:%lld ad_start:%s ad_end:%s "
+           "index:%lld id: %d ad_start:%s ad_end:%s "
            "ad_duration:%f\n",
-           s->ad_index++, av_ts2timestr(s->ad_start, &s->time_base),
+           s->ad_index++, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
            av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
   } else if (ad_duration > s->ad_max_duration) {
     av_log(s, AV_LOG_ERROR,
-           "LARGE ad: ad_start:%s ad_end:%s "
+           "LARGE ad: id: %d ad_start:%s ad_end:%s "
            "ad_duration:%f\n",
-           av_ts2timestr(s->ad_start, &s->time_base),
+           s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
+           av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
+  } else {
+    av_log(s, AV_LOG_ERROR,
+           "SMALL ad: id: %d ad_start:%s ad_end:%s "
+           "ad_duration:%f\n",
+           s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
            av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
   }
 }
@@ -277,12 +284,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
     if (likely_was_in_ad) {
       if (!s->ad_started) {
         s->ad_started = 1;
+        s->ad_id = rand();
         s->ad_start = picref->pts;
 
         av_dict_set(&picref->metadata, "lavfi.ad_start",
                     av_ts2timestr(s->ad_start, &s->time_base), 0);
 
-        av_log(s, AV_LOG_INFO, "ad started pts:%s\n",
+        av_log(s, AV_LOG_INFO, "ad started: id: %d pts:%s\n", s->ad_id,
                av_ts2timestr(s->ad_start, &s->time_base));
       }
     } else if (s->ad_started) {
