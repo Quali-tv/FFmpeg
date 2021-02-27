@@ -282,7 +282,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
         av_dict_set(&picref->metadata, "lavfi.ad_start",
                     av_ts2timestr(s->ad_start, &s->time_base), 0);
 
-        av_log(s, AV_LOG_VERBOSE, "ad started pts:%s\n",
+        av_log(s, AV_LOG_INFO, "ad started pts:%s\n",
                av_ts2timestr(s->ad_start, &s->time_base));
       }
     } else if (s->ad_started) {
