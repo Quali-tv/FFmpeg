@@ -239,6 +239,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
              av_ts2timestr(s->ad_start, &s->time_base));
     }
   } else if (s->ad_started) {
+    av_log(s, AV_LOG_INFO, "ad ended: id: %d pts:%s duration: %f\n", s->ad_id,
+           av_ts2timestr(picref->pts, &s->time_base), difference_in_time);
+
     s->ad_end = s->last_scene_pts;
 
     check_ad_end(ctx);
