@@ -48,6 +48,7 @@ typedef struct AdDetectContext {
   double ad_min_duration;
   double ad_max_duration;
 
+  int context_id;
   int ad_id;
   int ad_started;
   int64_t ad_start;
@@ -126,6 +127,7 @@ static int config_input(AVFilterLink *inlink) {
                      (desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
                      desc->nb_components >= 3;
 
+  s->context_id = rand();
   s->bit_depth = desc->comp[0].depth;
   s->nb_planes = is_yuv ? 1 : av_pix_fmt_count_planes(inlink->format);
 
@@ -189,21 +191,22 @@ static void check_ad_end(AVFilterContext *ctx) {
     last_ad_start = s->ad_start * av_q2d(s->time_base);
     last_ad_duration = ad_duration;
     av_log(s, AV_LOG_INFO,
-           "index:%lld id: %d ad_start:%s ad_end:%s "
+           "[%d] index:%lld id: %d ad_start:%s ad_end:%s "
            "ad_duration:%f\n",
-           s->ad_index++, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
+           s->context_id, s->ad_index++, s->ad_id,
+           av_ts2timestr(s->ad_start, &s->time_base),
            av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
   } else if (ad_duration > s->ad_max_duration) {
     av_log(s, AV_LOG_ERROR,
-           "LARGE ad: id: %d ad_start:%s ad_end:%s "
+           "[%d] LARGE ad: id: %d ad_start:%s ad_end:%s "
            "ad_duration:%f\n",
-           s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
+           s->context_id, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
            av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
   } else {
     av_log(s, AV_LOG_ERROR,
-           "SMALL ad: id: %d ad_start:%s ad_end:%s "
+           "[%d] SMALL ad: id: %d ad_start:%s ad_end:%s "
            "ad_duration:%f\n",
-           s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
+           s->context_id, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
            av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
   }
 }
@@ -235,12 +238,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
       av_dict_set(&picref->metadata, "lavfi.ad_start",
                   av_ts2timestr(s->ad_start, &s->time_base), 0);
 
-      av_log(s, AV_LOG_INFO, "ad started: id: %d pts:%s\n", s->ad_id,
-             av_ts2timestr(s->ad_start, &s->time_base));
+      av_log(s, AV_LOG_INFO, "[%d] ad started: id: %d pts:%s\n", s->context_id,
+             s->ad_id, av_ts2timestr(s->ad_start, &s->time_base));
     }
   } else if (s->ad_started) {
-    av_log(s, AV_LOG_INFO, "ad ended: id: %d pts:%s duration: %f\n", s->ad_id,
-           av_ts2timestr(picref->pts, &s->time_base), difference_in_time);
+    av_log(s, AV_LOG_INFO, "[%d] ad ended: id: %d pts:%s duration: %f\n",
+           s->context_id, s->ad_id, av_ts2timestr(picref->pts, &s->time_base),
+           difference_in_time);
 
     s->ad_end = s->last_scene_pts;
 
