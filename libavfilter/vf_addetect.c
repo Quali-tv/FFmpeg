@@ -222,7 +222,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
 
   const double difference_in_time =
       (picref->pts - s->last_scene_pts) * av_q2d(s->time_base);
-      
+
   const int likely_in_ad =
       difference_in_time <= s->last_scene_threshold ? 1 : 0;
 
@@ -239,14 +239,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
              av_ts2timestr(s->ad_start, &s->time_base));
     }
   } else if (s->ad_started) {
-    s->ad_started = 0;
-    s->ad_id = 0;
     s->ad_end = s->last_scene_pts;
 
     check_ad_end(ctx);
 
     av_dict_set(&picref->metadata, "lavfi.ad_end",
                 av_ts2timestr(s->ad_end, &s->time_base), 0);
+
+    s->ad_id = 0;
+    s->ad_started = 0;
   }
 
   s->last_picref_pts = picref->pts;
