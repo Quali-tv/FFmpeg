@@ -27,6 +27,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <time.h>
 
 #include "avfilter.h"
 #include "internal.h"
@@ -127,7 +128,8 @@ static int config_input(AVFilterLink *inlink) {
                      (desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
                      desc->nb_components >= 3;
 
-  s->context_id = rand();
+  srand(time(NULL));
+  s->context_id = rand() % 100;
   s->bit_depth = desc->comp[0].depth;
   s->nb_planes = is_yuv ? 1 : av_pix_fmt_count_planes(inlink->format);
 
@@ -232,7 +234,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
   if (likely_in_ad) {
     if (!s->ad_started) {
       s->ad_started = 1;
-      s->ad_id = rand();
+      s->ad_id = rand() % 100;
       s->ad_start = picref->pts;
 
       av_dict_set(&picref->metadata, "lavfi.ad_start",
