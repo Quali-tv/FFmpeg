@@ -40,17 +40,6 @@
 double last_ad_start = 0.0;
 double last_ad_duration = 0.0;
 
-typedef struct list_node {
-  double pts;
-  int likely_was_in_ad;
-  struct list_node *next;
-} list_node;
-
-typedef struct list {
-  list_node *head;
-  list_node *tail;
-} list;
-
 typedef struct AdDetectContext {
   const AVClass *class;
 
@@ -70,7 +59,6 @@ typedef struct AdDetectContext {
   AVRational time_base;
 
   // scene detection
-  list *scene_list;
   int bit_depth;
   int nb_planes;
   ptrdiff_t width[4];
@@ -129,41 +117,6 @@ static int query_formats(AVFilterContext *ctx) {
   return ff_set_common_formats(ctx, fmts_list);
 }
 
-static int clear_list(AdDetectContext *s, list *list) {
-  list_node *p = list->head;
-  while (p) {
-    list_node *s = p;
-    p = p->next;
-    av_free(s);
-  }
-
-  list->head = NULL;
-  list->tail = NULL;
-  return 0;
-}
-
-static int add_node_to_list(AdDetectContext *s, list *list, const double pts,
-                            const int likely_was_in_ad) {
-  list_node *node = av_mallocz(sizeof(list_node));
-  if (!node) {
-    av_log(s, AV_LOG_ERROR, "Failed to alloc node for list!");
-    return AVERROR(ENOMEM);
-  }
-
-  node->pts = pts;
-  node->likely_was_in_ad = likely_was_in_ad;
-
-  if (!list->head) {
-    list->head = node;
-    list->tail = node;
-  } else {
-    list->tail->next = node;
-    list->tail = node;
-  }
-
-  return 0;
-}
-
 static int config_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
   AdDetectContext *s = ctx->priv;
@@ -188,13 +141,6 @@ static int config_input(AVFilterLink *inlink) {
 
   s->sad = ff_scene_sad_get_fn(s->bit_depth == 8 ? 8 : 16);
   if (!s->sad) return AVERROR(EINVAL);
-
-  s->scene_list = av_mallocz(sizeof(*s->scene_list));
-  if (!s->scene_list) {
-    return AVERROR(ENOMEM);
-  } else {
-    add_node_to_list(s, s->scene_list, 0, 0);
-  }
 
   s->time_base = inlink->time_base;
 
@@ -268,45 +214,39 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
 
   const double scene_score = get_scene_score(ctx, picref);
   if (scene_score >= s->min_scene_threshold) {
-    const double difference_in_time =
-        (picref->pts - s->last_scene_pts) * av_q2d(s->time_base);
-    const int likely_was_in_ad =
-        difference_in_time <= s->last_scene_threshold ? 1 : 0;
-
-    if (s->scene_list->tail) {
-      s->scene_list->tail->likely_was_in_ad = likely_was_in_ad;
-    }
-
     av_log(s, AV_LOG_VERBOSE, "scene detected: %s score: %f prev_in_ad: %d\n",
            av_ts2timestr(picref->pts, &s->time_base), scene_score,
-           likely_was_in_ad);
-
-    if (likely_was_in_ad) {
-      if (!s->ad_started) {
-        s->ad_started = 1;
-        s->ad_id = rand();
-        s->ad_start = picref->pts;
-
-        av_dict_set(&picref->metadata, "lavfi.ad_start",
-                    av_ts2timestr(s->ad_start, &s->time_base), 0);
-
-        av_log(s, AV_LOG_INFO, "ad started: id: %d pts:%s\n", s->ad_id,
-               av_ts2timestr(s->ad_start, &s->time_base));
-      }
-    } else if (s->ad_started) {
-      s->ad_started = 0;
-      s->ad_end = s->last_scene_pts;
-
-      check_ad_end(ctx);
-
-      av_dict_set(&picref->metadata, "lavfi.ad_end",
-                  av_ts2timestr(s->ad_end, &s->time_base), 0);
-
-      clear_list(s, s->scene_list);
-    }
-
-    add_node_to_list(s, s->scene_list, picref->pts, 0);
+           s->ad_started);
     s->last_scene_pts = picref->pts;
+  }
+
+  const double difference_in_time =
+      (picref->pts - s->last_scene_pts) * av_q2d(s->time_base);
+      
+  const int likely_in_ad =
+      difference_in_time <= s->last_scene_threshold ? 1 : 0;
+
+  if (likely_in_ad) {
+    if (!s->ad_started) {
+      s->ad_started = 1;
+      s->ad_id = rand();
+      s->ad_start = picref->pts;
+
+      av_dict_set(&picref->metadata, "lavfi.ad_start",
+                  av_ts2timestr(s->ad_start, &s->time_base), 0);
+
+      av_log(s, AV_LOG_INFO, "ad started: id: %d pts:%s\n", s->ad_id,
+             av_ts2timestr(s->ad_start, &s->time_base));
+    }
+  } else if (s->ad_started) {
+    s->ad_started = 0;
+    s->ad_id = 0;
+    s->ad_end = s->last_scene_pts;
+
+    check_ad_end(ctx);
+
+    av_dict_set(&picref->metadata, "lavfi.ad_end",
+                av_ts2timestr(s->ad_end, &s->time_base), 0);
   }
 
   s->last_picref_pts = picref->pts;
