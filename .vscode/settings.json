@@ -25,6 +25,9 @@
         "typeinfo": "c",
         "hlsplaylist.h": "c",
         "internal.h": "c",
-        "bprint.h": "c"
+        "bprint.h": "c",
+        "array": "c",
+        "istream": "c",
+        "locale": "c"
     }
 }

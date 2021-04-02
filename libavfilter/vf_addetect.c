@@ -23,8 +23,6 @@
  * Video ad range detector
  */
 
-#include "vf_addetect.h"
-
 #include <float.h>
 #include <math.h>
 #include <time.h>
@@ -34,29 +32,32 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/time.h"
 #include "libavutil/timestamp.h"
 #include "libavutil/tree.h"
 #include "scene_sad.h"
 
-double last_ad_start = 0.0;
-double last_ad_duration = 0.0;
+#define NUM_AD_DETECT_INFO 1000
+
+typedef struct AdDetectInfo {
+  int64_t pts;
+  double pts_double;
+  double scene_score;
+  double black_score;
+  double white_score;
+  double silence_score;
+} AdDetectInfo;
 
 typedef struct AdDetectContext {
   const AVClass *class;
 
-  double min_scene_threshold;
-  double last_scene_threshold;
-  double ad_min_duration;
-  double ad_max_duration;
+  // configuration
+  int64_t context_id;
+  double black_threshold;
+  double white_threshold;
 
-  int context_id;
-  int ad_id;
-  int ad_started;
-  int64_t ad_start;
-  int64_t ad_end;
-  int64_t last_picref_pts;
-  int64_t last_scene_pts;
-  int64_t ad_index;
+  AdDetectInfo ad_detect_info[NUM_AD_DETECT_INFO];
+  int ad_detect_info_index;
 
   AVRational time_base;
 
@@ -66,47 +67,41 @@ typedef struct AdDetectContext {
   ptrdiff_t width[4];
   ptrdiff_t height[4];
   ff_scene_sad_fn sad;
+  AVFrame *prev_frame;
   double prev_mafd;
-  AVFrame *prev_picref;
 } AdDetectContext;
+
+typedef int (*ad_detect_pixel_score_fn)(const AdDetectContext *s,
+                                        const uint8_t pixel);
 
 #define OFFSET(x) offsetof(AdDetectContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
-static const AVOption addetect_options[] = {
-    {"min_d",
-     "set minimum ad duration",
-     OFFSET(ad_min_duration),
-     AV_OPT_TYPE_DOUBLE,
-     {.dbl = 10},
-     0,
-     1024,
-     FLAGS},
-    {"max_d",
-     "set maximum ad duration",
-     OFFSET(ad_max_duration),
-     AV_OPT_TYPE_DOUBLE,
-     {.dbl = 10},
-     0,
-     1024,
-     FLAGS},
-    {"mt",
-     "set minimum scene score threshold",
-     OFFSET(min_scene_threshold),
-     AV_OPT_TYPE_DOUBLE,
-     {.dbl = .75},
-     0,
-     1,
-     FLAGS},
-    {"ldt",
-     "set last scene duration threshold",
-     OFFSET(last_scene_threshold),
-     AV_OPT_TYPE_DOUBLE,
-     {.dbl = 30},
-     0,
-     100,
-     FLAGS},
-    {NULL}};
+static const AVOption addetect_options[] = {{"context_id",
+                                             "set context id",
+                                             OFFSET(context_id),
+                                             AV_OPT_TYPE_INT64,
+                                             {.i64 = 0},
+                                             0,
+                                             INT64_MAX,
+                                             FLAGS},
+                                            {"black_threshold",
+                                             "set blackness threshold",
+                                             OFFSET(black_threshold),
+                                             AV_OPT_TYPE_DOUBLE,
+                                             {.dbl = .1},
+                                             0,
+                                             1.0,
+                                             FLAGS},
+                                            {"white_threshold",
+                                             "set whiteness threshold",
+                                             OFFSET(white_threshold),
+                                             AV_OPT_TYPE_DOUBLE,
+                                             {.dbl = .9},
+                                             0,
+                                             1.0,
+                                             FLAGS},
+                                            {NULL}};
 
 AVFILTER_DEFINE_CLASS(addetect);
 
@@ -128,10 +123,11 @@ static int config_input(AVFilterLink *inlink) {
                      (desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
                      desc->nb_components >= 3;
 
-  srand(time(NULL));
-  s->context_id = rand() % 100;
+  s->ad_detect_info_index = 0;
   s->bit_depth = desc->comp[0].depth;
   s->nb_planes = is_yuv ? 1 : av_pix_fmt_count_planes(inlink->format);
+  s->black_threshold *= (1 << s->bit_depth);
+  s->white_threshold *= (1 << s->bit_depth);
 
   for (int plane = 0; plane < s->nb_planes; plane++) {
     const ptrdiff_t line_size =
@@ -148,129 +144,100 @@ static int config_input(AVFilterLink *inlink) {
 
   s->time_base = inlink->time_base;
 
-  av_log(s, AV_LOG_INFO, "ad_min_duration:%f ad_max_duration:%f\n",
-         s->ad_min_duration, s->ad_max_duration);
+  if (!s->context_id) return AVERROR(EINVAL);
+
+  av_log(s, AV_LOG_INFO,
+         "context id: %lld, bit depth: %d, nb planes: %d, black threshold: "
+         "%f, white threshold: %f\n",
+         s->context_id, s->bit_depth, s->nb_planes, s->black_threshold,
+         s->white_threshold);
 
   return 0;
 }
 
-static double get_scene_score(AVFilterContext *ctx, AVFrame *frame) {
-  double ret = 0;
-  AdDetectContext *s = ctx->priv;
-  AVFrame *prev_picref = s->prev_picref;
-
-  if (prev_picref && frame->height == prev_picref->height &&
-      frame->width == prev_picref->width) {
+static double get_scene_score(AdDetectContext *s, AVFrame *frame,
+                              AVFrame *prev_frame) {
+  if (prev_frame && frame->height == prev_frame->height &&
+      frame->width == prev_frame->width) {
     uint64_t sad = 0;
-    double mafd, diff;
     uint64_t count = 0;
 
     for (int plane = 0; plane < s->nb_planes; plane++) {
       uint64_t plane_sad;
-      s->sad(prev_picref->data[plane], prev_picref->linesize[plane],
+
+      emms_c();
+      s->sad(prev_frame->data[plane], prev_frame->linesize[plane],
              frame->data[plane], frame->linesize[plane], s->width[plane],
              s->height[plane], &plane_sad);
       sad += plane_sad;
       count += s->width[plane] * s->height[plane];
     }
 
-    emms_c();
-    mafd = (double)sad / count / (1ULL << (s->bit_depth - 8));
-    diff = fabs(mafd - s->prev_mafd);
-    ret = av_clipf(FFMIN(mafd, diff) / 100., 0, 1);
-    s->prev_mafd = mafd;
-    av_frame_free(&prev_picref);
+    const double mafd = (1.0f * sad) / count;
+    const double diff = fabs(mafd - s->prev_mafd);
+    return av_clipf(FFMIN(mafd, diff) / 100., 0, 1);
   }
-  s->prev_picref = av_frame_clone(frame);
-  return ret;
+
+  return 0;
 }
 
-static void check_ad_end(AVFilterContext *ctx) {
-  AdDetectContext *s = ctx->priv;
-
-  const double ad_duration = (s->ad_end - s->ad_start) * av_q2d(s->time_base);
-  if (ad_duration >= s->ad_min_duration && ad_duration <= s->ad_max_duration) {
-    last_ad_start = s->ad_start * av_q2d(s->time_base);
-    last_ad_duration = ad_duration;
-    av_log(s, AV_LOG_INFO,
-           "[%d] index:%lld id: %d ad_start:%s ad_end:%s "
-           "ad_duration:%f\n",
-           s->context_id, s->ad_index++, s->ad_id,
-           av_ts2timestr(s->ad_start, &s->time_base),
-           av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
-  } else if (ad_duration > s->ad_max_duration) {
-    av_log(s, AV_LOG_ERROR,
-           "[%d] LARGE ad: id: %d ad_start:%s ad_end:%s "
-           "ad_duration:%f\n",
-           s->context_id, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
-           av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
-  } else {
-    av_log(s, AV_LOG_ERROR,
-           "[%d] SMALL ad: id: %d ad_start:%s ad_end:%s "
-           "ad_duration:%f\n",
-           s->context_id, s->ad_id, av_ts2timestr(s->ad_start, &s->time_base),
-           av_ts2timestr(s->ad_end, &s->time_base), ad_duration);
-  }
+static int get_black_score(const AdDetectContext *s, const uint8_t pixel) {
+  return pixel <= s->black_threshold;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *picref) {
+static int get_white_score(const AdDetectContext *s, const uint8_t pixel) {
+  return pixel >= s->white_threshold;
+}
+
+static double get_pixel_score(const AdDetectContext *s, const AVFrame *frame,
+                              const ad_detect_pixel_score_fn score_fn) {
+  const int h = frame->height;
+  const int w = frame->width;
+  uint64_t counter = 0;
+
+  const uint8_t *p = frame->data[0];
+  for (int y = 0, pixel_index = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x, ++pixel_index) {
+      counter += score_fn(s, p[pixel_index]);
+    }
+  }
+
+  return (counter * 1.0) / (w * h);
+}
+
+static int filter_frame(AVFilterLink *inlink, AVFrame *frame) {
   AVFilterContext *ctx = inlink->dst;
   AdDetectContext *s = ctx->priv;
+  AVFrame *prev_frame = s->prev_frame;
+  AdDetectInfo *info =
+      &s->ad_detect_info[s->ad_detect_info_index % NUM_AD_DETECT_INFO];
 
-  const double scene_score = get_scene_score(ctx, picref);
-  if (scene_score >= s->min_scene_threshold) {
-    av_log(s, AV_LOG_VERBOSE, "scene detected: %s score: %f prev_in_ad: %d\n",
-           av_ts2timestr(picref->pts, &s->time_base), scene_score,
-           s->ad_started);
-    s->last_scene_pts = picref->pts;
-  }
+  if (prev_frame) {
+    info->pts = frame->pts;
+    info->pts_double = frame->pts * av_q2d(s->time_base);
 
-  const double difference_in_time =
-      (picref->pts - s->last_scene_pts) * av_q2d(s->time_base);
+    info->scene_score = get_scene_score(s, frame, prev_frame);
+    info->black_score = get_pixel_score(s, frame, get_black_score);
+    info->white_score = get_pixel_score(s, frame, get_white_score);
 
-  const int likely_in_ad =
-      difference_in_time <= s->last_scene_threshold ? 1 : 0;
+    av_log(s, AV_LOG_INFO,
+           "context id: %lld\npts: %f\nscene score: %f\nblack score: "
+           "%f\nwhite score: %f\n\n",
+           s->context_id, info->pts_double, info->scene_score,
+           info->black_score, info->white_score);
 
-  if (likely_in_ad) {
-    if (!s->ad_started) {
-      s->ad_started = 1;
-      s->ad_id = rand() % 100;
-      s->ad_start = picref->pts;
-
-      av_dict_set(&picref->metadata, "lavfi.ad_start",
-                  av_ts2timestr(s->ad_start, &s->time_base), 0);
-
-      av_log(s, AV_LOG_INFO, "[%d] ad started: id: %d pts:%s\n", s->context_id,
-             s->ad_id, av_ts2timestr(s->ad_start, &s->time_base));
+    if ((++s->ad_detect_info_index % NUM_AD_DETECT_INFO) == 0) {
+      exit(0);
     }
-  } else if (s->ad_started) {
-    av_log(s, AV_LOG_INFO, "[%d] ad ended: id: %d pts:%s duration: %f\n",
-           s->context_id, s->ad_id, av_ts2timestr(picref->pts, &s->time_base),
-           difference_in_time);
 
-    s->ad_end = s->last_scene_pts;
-
-    check_ad_end(ctx);
-
-    av_dict_set(&picref->metadata, "lavfi.ad_end",
-                av_ts2timestr(s->ad_end, &s->time_base), 0);
-
-    s->ad_id = 0;
-    s->ad_started = 0;
+    av_frame_free(&prev_frame);
   }
 
-  s->last_picref_pts = picref->pts;
-  return ff_filter_frame(inlink->dst->outputs[0], picref);
+  s->prev_frame = av_frame_clone(frame);
+  return ff_filter_frame(inlink->dst->outputs[0], frame);
 }
 
-static av_cold void uninit(AVFilterContext *ctx) {
-  AdDetectContext *s = ctx->priv;
-
-  if (s->ad_started) {
-    s->ad_end = s->last_picref_pts;
-    check_ad_end(ctx);
-  }
-}
+static void addetect_uninit(AVFilterContext *ctx) {}
 
 static const AVFilterPad addetect_inputs[] = {{
                                                   .name = "default",
@@ -293,6 +260,6 @@ AVFilter ff_vf_addetect = {
     .query_formats = query_formats,
     .inputs = addetect_inputs,
     .outputs = addetect_outputs,
-    .uninit = uninit,
+    .uninit = addetect_uninit,
     .priv_class = &addetect_class,
 };

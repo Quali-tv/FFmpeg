@@ -52,7 +52,6 @@
 #endif
 #include "hlsplaylist.h"
 #include "internal.h"
-#include "libavfilter/vf_addetect.h"
 #include "os_support.h"
 
 typedef enum {
@@ -1614,15 +1613,7 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs) {
   }
   if (hls->start_sequence > 0) {
     avio_printf(byterange_mode ? hls->m3u8_out : vs->out,
-                "#EXT-X-FIRST-MEDIA-SEQUENCE: %d\n", hls->start_sequence);
-  }
-  if (last_ad_start > 0) {
-    avio_printf(byterange_mode ? hls->m3u8_out : vs->out,
-                "#EXT-X-LAST-AD-START: %f\n", last_ad_start);
-  }
-  if (last_ad_duration > 0) {
-    avio_printf(byterange_mode ? hls->m3u8_out : vs->out,
-                "#EXT-X-LAST-AD-DURATION: %f\n", last_ad_duration);
+                "#EXT-X-FIRST-MEDIA-SEQUENCE: %lld\n", hls->start_sequence);
   }
   for (en = vs->segments; en; en = en->next) {
     if ((hls->encrypt || hls->key_info_file) &&
