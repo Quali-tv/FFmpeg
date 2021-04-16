@@ -24,6 +24,7 @@
  */
 
 #include <float.h>
+#include <koku/koku.h>
 #include <math.h>
 #include <time.h>
 
@@ -39,25 +40,19 @@
 
 #define NUM_AD_DETECT_INFO 1000
 
-typedef struct AdDetectInfo {
-  int64_t pts;
-  double pts_double;
-  double scene_score;
-  double black_score;
-  double white_score;
-  double silence_score;
-} AdDetectInfo;
-
 typedef struct AdDetectContext {
   const AVClass *class;
 
   // configuration
-  int64_t context_id;
+  const char *server_address;
+  int server_port;
+  const char *application_id;
+  const char *context_id;
   double black_threshold;
   double white_threshold;
 
-  AdDetectInfo ad_detect_info[NUM_AD_DETECT_INFO];
-  int ad_detect_info_index;
+  void *koku_ctx;
+  int koku_index;
 
   AVRational time_base;
 
@@ -77,31 +72,56 @@ typedef int (*ad_detect_pixel_score_fn)(const AdDetectContext *s,
 #define OFFSET(x) offsetof(AdDetectContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
-static const AVOption addetect_options[] = {{"context_id",
-                                             "set context id",
-                                             OFFSET(context_id),
-                                             AV_OPT_TYPE_INT64,
-                                             {.i64 = 0},
-                                             0,
-                                             INT64_MAX,
-                                             FLAGS},
-                                            {"black_threshold",
-                                             "set blackness threshold",
-                                             OFFSET(black_threshold),
-                                             AV_OPT_TYPE_DOUBLE,
-                                             {.dbl = .1},
-                                             0,
-                                             1.0,
-                                             FLAGS},
-                                            {"white_threshold",
-                                             "set whiteness threshold",
-                                             OFFSET(white_threshold),
-                                             AV_OPT_TYPE_DOUBLE,
-                                             {.dbl = .9},
-                                             0,
-                                             1.0,
-                                             FLAGS},
-                                            {NULL}};
+static const AVOption addetect_options[] = {
+    {"server_address",
+     "set koku application server address",
+     OFFSET(server_address),
+     AV_OPT_TYPE_STRING,
+     {.str = NULL},
+     0,
+     0,
+     FLAGS},
+    {"server_port",
+     "set koku application server port",
+     OFFSET(server_port),
+     AV_OPT_TYPE_INT,
+     {.i64 = 0},
+     1,
+     64000,
+     FLAGS},
+    {"application_id",
+     "set koku application id",
+     OFFSET(application_id),
+     AV_OPT_TYPE_STRING,
+     {.str = NULL},
+     0,
+     0,
+     FLAGS},
+    {"context_id",
+     "set koku context id",
+     OFFSET(context_id),
+     AV_OPT_TYPE_STRING,
+     {.str = NULL},
+     0,
+     0,
+     FLAGS},
+    {"black_threshold",
+     "set blackness threshold",
+     OFFSET(black_threshold),
+     AV_OPT_TYPE_DOUBLE,
+     {.dbl = .1},
+     0,
+     1.0,
+     FLAGS},
+    {"white_threshold",
+     "set whiteness threshold",
+     OFFSET(white_threshold),
+     AV_OPT_TYPE_DOUBLE,
+     {.dbl = .9},
+     0,
+     1.0,
+     FLAGS},
+    {NULL}};
 
 AVFILTER_DEFINE_CLASS(addetect);
 
@@ -123,7 +143,7 @@ static int config_input(AVFilterLink *inlink) {
                      (desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
                      desc->nb_components >= 3;
 
-  s->ad_detect_info_index = 0;
+  s->koku_index = 0;
   s->bit_depth = desc->comp[0].depth;
   s->nb_planes = is_yuv ? 1 : av_pix_fmt_count_planes(inlink->format);
   s->black_threshold *= (1 << s->bit_depth);
@@ -144,13 +164,23 @@ static int config_input(AVFilterLink *inlink) {
 
   s->time_base = inlink->time_base;
 
+  if (!s->server_address) return AVERROR(EINVAL);
+  if (!s->server_port) return AVERROR(EINVAL);
+  if (!s->application_id) return AVERROR(EINVAL);
   if (!s->context_id) return AVERROR(EINVAL);
 
+  s->koku_ctx = Koku_create(s->server_address, s->server_port,
+                            s->application_id, s->context_id);
+
+  if (!s->koku_ctx) return AVERROR(EINVAL);
+
   av_log(s, AV_LOG_INFO,
-         "context id: %lld, bit depth: %d, nb planes: %d, black threshold: "
+         "server address: %s, server port: %d, application id: %s, context id: "
+         "%s, bit depth: "
+         "%d, nb planes: %d, black threshold: "
          "%f, white threshold: %f\n",
-         s->context_id, s->bit_depth, s->nb_planes, s->black_threshold,
-         s->white_threshold);
+         s->server_address, s->server_port, s->application_id, s->context_id,
+         s->bit_depth, s->nb_planes, s->black_threshold, s->white_threshold);
 
   return 0;
 }
@@ -209,25 +239,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame) {
   AVFilterContext *ctx = inlink->dst;
   AdDetectContext *s = ctx->priv;
   AVFrame *prev_frame = s->prev_frame;
-  AdDetectInfo *info =
-      &s->ad_detect_info[s->ad_detect_info_index % NUM_AD_DETECT_INFO];
 
   if (prev_frame) {
-    info->pts = frame->pts;
-    info->pts_double = frame->pts * av_q2d(s->time_base);
+    const double pts = frame->pts * av_q2d(s->time_base);
+    const double scene_score = get_scene_score(s, frame, prev_frame);
+    const double black_score = get_pixel_score(s, frame, get_black_score);
+    const double white_score = get_pixel_score(s, frame, get_white_score);
 
-    info->scene_score = get_scene_score(s, frame, prev_frame);
-    info->black_score = get_pixel_score(s, frame, get_black_score);
-    info->white_score = get_pixel_score(s, frame, get_white_score);
+    Koku_add_scene_detection_info(s->koku_ctx, pts, scene_score, black_score,
+                                  white_score);
 
-    av_log(s, AV_LOG_INFO,
-           "context id: %lld\npts: %f\nscene score: %f\nblack score: "
-           "%f\nwhite score: %f\n\n",
-           s->context_id, info->pts_double, info->scene_score,
-           info->black_score, info->white_score);
-
-    if ((++s->ad_detect_info_index % NUM_AD_DETECT_INFO) == 0) {
-      exit(0);
+    if ((++s->koku_index % NUM_AD_DETECT_INFO) == 0) {
+      Koku_transmit_scene_detection_info(s->koku_ctx);
     }
 
     av_frame_free(&prev_frame);
