@@ -26,5 +26,6 @@
         "hlsplaylist.h": "c",
         "internal.h": "c",
         "bprint.h": "c"
-    }
+    },
+    "editor.defaultFormatter": "ms-vscode.cpptools"
 }

@@ -3007,18 +3007,21 @@ static void flush_muxing_queues(OutputFile *of, int try_improve_time_base) {
     something_done = 0;
     for (int i = 0; i < of->ctx->nb_streams; i++) {
       OutputStream *ost = output_streams[of->ost_index + i];
+      const int ost_muxing_queue_size = av_fifo_size(ost->muxing_queue);
 
       /* try to improve muxing time_base (only possible if nothing has been
        * written yet) */
-      if (try_improve_time_base && !av_fifo_size(ost->muxing_queue))
+      if (try_improve_time_base && !ost_muxing_queue_size)
         ost->mux_timebase = ost->st->time_base;
 
-      if (!of->waiting_for_min_mux_queue && av_fifo_size(ost->muxing_queue)) {
+      if (!of->waiting_for_min_mux_queue && ost_muxing_queue_size) {
         AVPacket pkt;
         av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
-        ost->muxing_queue_data_size -= pkt.size;
-        write_packet(of, &pkt, ost, 1);
-        something_done = 1;
+        if (pkt.size <= ost_muxing_queue_size) {
+          ost->muxing_queue_data_size -= pkt.size;
+          write_packet(of, &pkt, ost, 1);
+          something_done = 1;
+        }
       }
     }
   } while (something_done);

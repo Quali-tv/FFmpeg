@@ -87,8 +87,8 @@ typedef struct HLSSegment {
   unsigned var_stream_idx;
 
   struct scte35_event *event;
-    enum scte35_event_state event_state;
-    int64_t start_pts;
+  enum scte35_event_state event_state;
+  int64_t start_pts;
 
   char key_uri[LINE_BUFFER_SIZE + 1];
   char iv_string[KEYSIZE * 2 + 1];
@@ -161,7 +161,7 @@ typedef struct VariantStream {
   int discontinuity;
   int reference_stream_index;
 
-struct scte35_interface *scte_iface;
+  struct scte35_interface *scte_iface;
   HLSSegment *segments;
   HLSSegment *last_segment;
   HLSSegment *old_segments;
@@ -685,7 +685,7 @@ static int hls_delete_old_segments(AVFormatContext *s, HLSContext *hls,
     previous_segment = segment;
     segment = previous_segment->next;
     if (vs->scte_iface)
-            vs->scte_iface->unref_scte35_event(&previous_segment->event);
+      vs->scte_iface->unref_scte35_event(&previous_segment->event);
     av_freep(&previous_segment);
   }
 
@@ -1163,12 +1163,12 @@ static int hls_append_segment(struct AVFormatContext *s, HLSContext *hls,
   en->next = NULL;
   en->discont = 0;
   en->discont_program_date_time = 0;
-  en->event    = event;
-    en->start_pts  = start_pts;
+  en->event = event;
+  en->start_pts = start_pts;
 
-    if (vs->scte_iface) {
-        en->event_state = vs->scte_iface->event_state;
-    }
+  if (vs->scte_iface) {
+    en->event_state = vs->scte_iface->event_state;
+  }
 
   if (vs->discontinuity) {
     en->discont = 1;
@@ -1319,7 +1319,7 @@ static int parse_playlist(AVFormatContext *s, const char *url,
         new_start_pos = avio_tell(vs->avf->pb);
         vs->size = new_start_pos - vs->start_pos;
         ret = hls_append_segment(s, hls, vs, vs->duration, vs->start_pos,
-                                 vs->end_pts, NULL,vs->size);
+                                 vs->end_pts, NULL, vs->size);
         vs->last_segment->discont_program_date_time = discont_program_date_time;
         discont_program_date_time += vs->duration;
         if (ret < 0) goto fail;
@@ -1640,10 +1640,11 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs) {
                 "#EXT-X-LAST-AD-DURATION: %f\n", last_ad_duration);
   }
   for (en = vs->segments; en; en = en->next) {
-            if (vs->scte_iface && en->event) {
-                char *str = vs->scte_iface->get_hls_string(vs->scte_iface, en->event, en->event_state, en->pos);
-                avio_printf(vs->out, "%s", str);
-            }
+    if (vs->scte_iface && en->event) {
+      char *str = vs->scte_iface->get_hls_string(vs->scte_iface, en->event,
+                                                 en->event_state, en->pos);
+      avio_printf(vs->out, "%s", str);
+    }
 
     if ((hls->encrypt || hls->key_info_file) &&
         (!key_uri || strcmp(en->key_uri, key_uri) ||
@@ -2367,7 +2368,7 @@ static int hls_write_header(AVFormatContext *s) {
     ret = avformat_write_header(vs->avf, NULL);
     if (ret < 0) return ret;
     // av_assert0(s->nb_streams == hls->avf->nb_streams);
-    for (ts_index = 0,j = 0; j < vs->nb_streams; j++) {
+    for (ts_index = 0, j = 0; j < vs->nb_streams; j++) {
       AVStream *inner_st;
       AVStream *outer_st = vs->streams[j];
 
@@ -2382,26 +2383,28 @@ static int hls_write_header(AVFormatContext *s) {
         }
       }
 
-      if ( outer_st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
-        if(vs->vtt_avf){
-            inner_st = vs->vtt_avf->streams[0];
-            avpriv_set_pts_info(outer_st, inner_st->pts_wrap_bits, inner_st->time_base.num, inner_st->time_base.den);
-        }
-         else {
-        /* We have a subtitle stream, when the user does not want one */
-        inner_st = NULL;
-        continue;
-      }
-        } else if (outer_st->codecpar->codec_type == AVMEDIA_TYPE_DATA) {
-            inner_st = vs->avf->streams[ts_index];
-            vs->scte_iface = ff_alloc_scte35_parser(vs, outer_st->time_base);
-            continue;
+      if (outer_st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+        if (vs->vtt_avf) {
+          inner_st = vs->vtt_avf->streams[0];
+          avpriv_set_pts_info(outer_st, inner_st->pts_wrap_bits,
+                              inner_st->time_base.num, inner_st->time_base.den);
         } else {
-            inner_st = vs->avf->streams[ts_index];
-            avpriv_set_pts_info(outer_st, inner_st->pts_wrap_bits, inner_st->time_base.num, inner_st->time_base.den);
-            ts_index++;
+          /* We have a subtitle stream, when the user does not want one */
+          inner_st = NULL;
+          continue;
         }
-     
+      } else if (outer_st->codecpar->codec_type == AVMEDIA_TYPE_DATA) {
+        inner_st = vs->avf->streams[ts_index];
+        vs->scte_iface = ff_alloc_scte35_parser(hls, outer_st->time_base);
+        av_log(s, AV_LOG_INFO, "Creating SCTE 35 parser.\n");
+        continue;
+      } else {
+        inner_st = vs->avf->streams[ts_index];
+        avpriv_set_pts_info(outer_st, inner_st->pts_wrap_bits,
+                            inner_st->time_base.num, inner_st->time_base.den);
+        ts_index++;
+      }
+
       if (outer_st->codecpar->codec_id == AV_CODEC_ID_HEVC &&
           outer_st->codecpar->codec_tag != MKTAG('h', 'v', 'c', '1')) {
         av_log(
@@ -2510,10 +2513,10 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt) {
     return AVERROR(ENOMEM);
   }
 
-   if (st->codecpar->codec_id == AV_CODEC_ID_SCTE_35) {
-        ret = ff_parse_scte35_pkt(vs->scte_iface, pkt);
-        return ret;
-    }
+  if (st->codecpar->codec_id == AV_CODEC_ID_SCTE_35) {
+    ret = ff_parse_scte35_pkt(vs->scte_iface, pkt);
+    return ret;
+  }
 
   end_pts = hls->recording_time * vs->number;
 
@@ -2570,13 +2573,14 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt) {
   }
 
   if (vs->scte_iface)
-        vs->scte_iface->update_video_pts(vs->scte_iface, pkt->pts * st->time_base.num / st->time_base.den);
+    vs->scte_iface->update_video_pts(
+        vs->scte_iface, pkt->pts * st->time_base.num / st->time_base.den);
 
   can_split = can_split && (pkt->pts - vs->end_pts > 0);
   if (vs->packets_written && can_split &&
       ((av_compare_ts(pkt->pts - vs->start_pts, st->time_base, end_pts,
-                    AV_TIME_BASE_Q) >= 0) ||
-         (vs->scte_iface && vs->scte_iface->event_state == EVENT_OUT))) {
+                      AV_TIME_BASE_Q) >= 0) ||
+       (vs->scte_iface && vs->scte_iface->event_state == EVENT_OUT))) {
     int64_t new_start_pos;
     int byterange_mode =
         (hls->flags & HLS_SINGLE_FILE) || (hls->max_seg_size > 0);
@@ -2684,19 +2688,18 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt) {
     if (!old_filename) {
       return AVERROR(ENOMEM);
     }
-        
 
     if (vs->start_pos || hls->segment_type != SEGMENT_TYPE_FMP4) {
       double cur_duration = (double)(pkt->pts - vs->end_pts) *
                             st->time_base.num / st->time_base.den;
 
-                            if (vs->scte_iface) {
-            event = vs->scte_iface->update_event_state(vs->scte_iface);
-            if (event)
-                vs->scte_iface->ref_scte35_event(event);
-        }
+      if (vs->scte_iface) {
+        event = vs->scte_iface->update_event_state(vs->scte_iface);
+        if (event) vs->scte_iface->ref_scte35_event(event);
+      }
 
-      ret = hls_append_segment(s, hls, vs, cur_duration, vs->start_pos, vs->end_pts, event, vs->size);
+      ret = hls_append_segment(s, hls, vs, cur_duration, vs->start_pos,
+                               vs->end_pts, event, vs->size);
       vs->end_pts = pkt->pts;
       vs->duration = 0;
       if (ret < 0) {
