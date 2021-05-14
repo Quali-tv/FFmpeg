@@ -2695,11 +2695,14 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt) {
 
       if (vs->scte_iface) {
         event = vs->scte_iface->update_event_state(vs->scte_iface);
-        if (event) vs->scte_iface->ref_scte35_event(event);
+        if (event) {
+          vs->scte_iface->ref_scte35_event(event);
+        }
       }
 
       ret = hls_append_segment(s, hls, vs, cur_duration, vs->start_pos,
                                vs->end_pts, event, vs->size);
+
       vs->end_pts = pkt->pts;
       vs->duration = 0;
       if (ret < 0) {

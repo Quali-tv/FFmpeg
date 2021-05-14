@@ -21,6 +21,7 @@
 #ifndef AVFORMAT_SCTE_35_H
 #define AVFORMAT_SCTE_35_H
 
+#include "libavcodec/avcodec.h"
 #include "libavutil/bprint.h"
 
 struct scte35_event {
@@ -59,6 +60,7 @@ struct scte35_interface {
   enum scte35_event_state event_state;
   /* time base of pts used in parser */
   AVRational timebase;
+  int64_t pts_adjust;
   struct scte35_event *current_event;
   /* saved previous state to correctly transition
       the event state */
