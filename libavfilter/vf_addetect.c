@@ -49,6 +49,7 @@ typedef struct AdDetectContext {
   int server_port;
   const char *application_id;
   const char *context_id;
+  int overwrite_existing_data;
   double black_threshold;
   double white_threshold;
 
@@ -126,6 +127,14 @@ static const AVOption addetect_options[] = {
      {.str = NULL},
      0,
      0,
+     FLAGS},
+     {"overwrite_existing_data",
+     "overwrite existing data if found",
+     OFFSET(overwrite_existing_data),
+     AV_OPT_TYPE_BOOL,
+     {.i64 = 0},
+     0,
+     1,
      FLAGS},
     {"black_threshold",
      "set blackness threshold",
@@ -266,9 +275,9 @@ static int config_audio_input(AVFilterLink *inlink) {
 
   av_log(s, AV_LOG_INFO,
          "server address: %s, server port: %d, application id: %s, context id: "
-         "%s, width: %d, height: %d, bit depth: %d, black threshold: "
+         "%s, overwrite: %d, width: %d, height: %d, bit depth: %d, black threshold: "
          "%f, white threshold: %f\n",
-         s->server_address, s->server_port, s->application_id, s->context_id,
+         s->server_address, s->server_port, s->application_id, s->context_id, s->overwrite_existing_data,
          s->width, s->height, s->bit_depth, s->black_threshold,
          s->white_threshold);
 
@@ -317,15 +326,15 @@ static int config_video_input(AVFilterLink *inlink) {
   if (!s->context_id) return AVERROR(EINVAL);
 
   s->koku_ctx = Koku_create(s->server_address, s->server_port,
-                            s->application_id, s->context_id);
+                            s->application_id, s->context_id,s->overwrite_existing_data);
 
   if (!s->koku_ctx) return AVERROR(EINVAL);
 
   av_log(s, AV_LOG_INFO,
          "server address: %s, server port: %d, application id: %s, context id: "
-         "%s, width: %d, height: %d, bit depth: %d, black threshold: "
+         "%s, overwrite: %d, width: %d, height: %d, bit depth: %d, black threshold: "
          "%f, white threshold: %f\n",
-         s->server_address, s->server_port, s->application_id, s->context_id,
+         s->server_address, s->server_port, s->application_id, s->context_id, s->overwrite_existing_data,
          s->width, s->height, s->bit_depth, s->black_threshold,
          s->white_threshold);
 
