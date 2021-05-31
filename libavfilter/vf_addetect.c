@@ -121,7 +121,7 @@ static const AVOption addetect_options[] = {
      "set koku application server port",
      OFFSET(server_port),
      AV_OPT_TYPE_INT,
-     {.i64 = 8000},
+     {.i64 = 443},
      1,
      64000,
      FLAGS},
@@ -184,6 +184,17 @@ static const AVOption addetect_options[] = {
     {NULL}};
 
 AVFILTER_DEFINE_CLASS(addetect);
+
+static av_always_inline double simple_encode(const double pts, int *index,
+                                             double val) {
+  int64_t xor_key = (int64_t)(pts * 0x1fff * (++*index));
+  unsigned char *a = (unsigned char *)&xor_key;
+  unsigned char *b = (unsigned char *)&val;
+  for (int i = 0; i < sizeof(val); ++i) {
+    b[i] ^= a[i];
+  }
+  return val;
+}
 
 static av_always_inline void audio_level_reset(AdDetectContext *s) {
   for (int i = 0; i < s->nb_channels; ++i) {
@@ -504,18 +515,25 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   }
 
   if (s->prev_frame) {
+    int encode_index = 1;
     const double pts = frame->pts * av_q2d(s->video_time_base);
-    const double scene_score = get_scene_score(s, s->frame, s->prev_frame);
-    const double black_score = get_pixel_score(s, s->frame, get_black_score);
-    const double white_score = get_pixel_score(s, s->frame, get_white_score);
+    const double scene_score = simple_encode(
+        pts, &encode_index, get_scene_score(s, s->frame, s->prev_frame));
+    const double black_score = simple_encode(
+        pts, &encode_index, get_pixel_score(s, s->frame, get_black_score));
+    const double white_score = simple_encode(
+        pts, &encode_index, get_pixel_score(s, s->frame, get_white_score));
+    const double silence_duration =
+        simple_encode(pts, &encode_index, s->current_silence_duration);
 
     for (int i = 0; i < s->nb_channels; ++i) {
-      audio_levels[i] = s->audio_levels[i].mean;
+      audio_levels[i] =
+          simple_encode(pts, &encode_index, s->audio_levels[i].mean);
     }
 
     Koku_add_scene_detection_info(s->koku_ctx, pts, scene_score, black_score,
-                                  white_score, s->current_silence_duration,
-                                  audio_levels, s->nb_channels);
+                                  white_score, silence_duration, audio_levels,
+                                  s->nb_channels);
 
     s->audio_levels_need_reset = 1;
 
