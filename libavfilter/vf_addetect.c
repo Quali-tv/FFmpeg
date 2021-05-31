@@ -38,7 +38,6 @@
 #include "libavutil/tree.h"
 #include "scene_sad.h"
 
-#define NUM_AD_DETECT_INFO 1000
 #define MIP_MAP_SIZE 4
 
 typedef struct AudioLevelContext {
@@ -64,6 +63,7 @@ typedef struct AdDetectContext {
 
   void *koku_ctx;
   int koku_index;
+  int transmit_threshold;
 
   AVRational video_time_base;
 
@@ -368,6 +368,7 @@ static int config_video_input(AVFilterLink *inlink) {
   s->h = inlink->h;
   s->frame_rate = inlink->frame_rate;
   s->video_format = inlink->format;
+  s->transmit_threshold = (s->frame_rate.num * 60 * 2) / s->frame_rate.den;
 
   s->linesize = av_image_get_linesize(inlink->format, inlink->w, 0);
   s->width = (s->linesize >> (s->bit_depth > 8)) / (MIP_MAP_SIZE >> 1);
@@ -537,7 +538,7 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
 
     s->audio_levels_need_reset = 1;
 
-    if ((++s->koku_index % NUM_AD_DETECT_INFO) == 0) {
+    if ((++s->koku_index % s->transmit_threshold) == 0) {
       Koku_transmit_scene_detection_info(s->koku_ctx);
     }
 
@@ -555,7 +556,14 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   }
 }
 
-static void addetect_uninit(AVFilterContext *ctx) {}
+static void addetect_uninit(AVFilterContext *ctx) {
+  if (ctx) {
+    AdDetectContext *s = ctx->priv;
+    if (s && s->koku_ctx) {
+      Koku_transmit_scene_detection_info(s->koku_ctx);
+    }
+  }
+}
 
 static const AVFilterPad addetect_inputs[] = {
     {
