@@ -25,6 +25,7 @@
 
 #include <float.h>
 #include <koku/koku.h>
+#include <license++/license-c-bindings.h>
 #include <math.h>
 #include <time.h>
 
@@ -52,6 +53,7 @@ typedef struct AdDetectContext {
   const AVClass *class;
 
   // configuration
+  const char *license;
   const char *server_address;
   int server_port;
   const char *application_id;
@@ -109,6 +111,14 @@ typedef int (*ad_detect_pixel_score_fn)(const AdDetectContext *s,
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption addetect_options[] = {
+    {"license",
+     "set koku license",
+     OFFSET(license),
+     AV_OPT_TYPE_STRING,
+     {.str = ""},
+     0,
+     0,
+     FLAGS},
     {"server_address",
      "set koku application server address",
      OFFSET(server_address),
@@ -184,6 +194,70 @@ static const AVOption addetect_options[] = {
     {NULL}};
 
 AVFILTER_DEFINE_CLASS(addetect);
+
+static const unsigned char license_manager_signature_key[] = {
+    0x5B, 0x6A, 0xF5, 0x93, 0xED, 0xAB, 0xB3, 0x10,
+    0xF5, 0xBE, 0x00, 0xE6, 0x4F, 0x1B, 0x70, 0xC8};
+
+static const IssuingAuthorityParameters authorities[] = {
+    {"sample-license-authority", "Sample License Authority",
+     /*key pair*/ NULL,
+     /*private key*/ "",
+     "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklEQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ"
+     "0FRMEFNSUlCQ0FLQ0FRRUF0eGdKUENWSUhQanhWamcwNWUydQpaNURqNDNIdDF0WFlUK3VkVV"
+     "RTL3RrSlgyQzltcWg4aktQdU9mQXV6cWJQK2V6ckF0Q0hDem1ETmxmRTBqZU5TClVUZlFWbFh"
+     "xNzd3UGh6ajZWNm1lWTNlcmYxK0pUY0dROTVDRTdBbFFmaW9ObVoxTU45MFI5ejZCWUkwUmlU"
+     "eHUKQVFXckZqdm1rMUsrZ1RRN2dPbVV1WEx1MzJ2R2k1UTRwSUpUcEkwTFhCSnlCclU0SzVlN"
+     "1ZNWFowdCtvV1Fzdwpjcm05bkJYWVpleVRJcUZ2VmVkbEpxZTArTm9GTzN4T3VUdjFKK2Jxa1"
+     "Z4UW5CVzNDZ3JHa2NPRlZFa0RDRE44CkZoZ0N5SEpJRDliZkdsNlBJUEp0TE94UlF2M21KK25"
+     "qS01ycXlrcE9panpZc3JSNFJZeURXTDZ2bWEyWlJkaVkKS1FJQkVRPT0KLS0tLS1FTkQgUFVC"
+     "TElDIEtFWS0tLS0tCg==",
+     87600U, 1}};
+
+static av_always_inline const char *date_to_string(time_t dt) {
+  static char buffer[512];
+  struct tm *info;
+
+  info = localtime(&dt);
+  strftime(buffer, 80, "%x - %I:%M%p", info);
+  return buffer;
+}
+
+static av_always_inline int check_license(AdDetectContext *s) {
+  license_key_register_init(license_manager_signature_key, authorities);
+
+  const void *lm = license_manager_create();
+  if (!lm) {
+    return -10;
+  }
+
+  void *l = license_create();
+  if (!l) {
+    return -20;
+  }
+
+  if (!license_load(l, s->license)) {
+    return -30;
+  }
+
+  av_log(s, AV_LOG_INFO, "Licensing Authority: %s\n",
+         license_get_issuing_authority_id(l));
+  av_log(s, AV_LOG_INFO, "Issued To: %s\n", license_get_licensee(l));
+  av_log(s, AV_LOG_INFO, "Issued On: %s\n",
+         date_to_string(license_get_issue_date(l)));
+  av_log(s, AV_LOG_INFO, "Expires On: %s\n",
+         date_to_string(license_get_expiry_date(l)));
+
+  if (!license_manager_validate(lm, l, 0, "")) {
+    return -40;
+  }
+
+  if (strcmp(license_get_licensee(l), s->application_id)) {
+    return -50;
+  }
+
+  return 0;
+}
 
 static av_always_inline double simple_encode(const double pts, int *index,
                                              double val) {
@@ -356,6 +430,13 @@ static int config_audio_input(AVFilterLink *inlink) {
 static int config_video_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
   AdDetectContext *s = ctx->priv;
+  int r;
+
+  r = check_license(s);
+  if (r) {
+    av_log(s, AV_LOG_ERROR, "Failed to validate license. Reason: %d\n", r);
+    return AVERROR(EINVAL);
+  }
 
   const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
 
@@ -371,8 +452,8 @@ static int config_video_input(AVFilterLink *inlink) {
   s->transmit_threshold = (s->frame_rate.num * 60 * 2) / s->frame_rate.den;
 
   s->linesize = av_image_get_linesize(inlink->format, inlink->w, 0);
-  s->width = (s->linesize >> (s->bit_depth > 8)) / (MIP_MAP_SIZE >> 1);
-  s->height = inlink->h / (MIP_MAP_SIZE >> 1);
+  s->width = (s->linesize >> (s->bit_depth > 8)) / sqrt(MIP_MAP_SIZE);
+  s->height = inlink->h / sqrt(MIP_MAP_SIZE);
 
   s->sad = ff_scene_sad_get_fn(8);
   if (!s->sad) return AVERROR(EINVAL);
@@ -442,20 +523,29 @@ static int get_white_score(const AdDetectContext *s, const uint8_t pixel) {
   return pixel >= s->white_threshold;
 }
 
-static double get_pixel_score(const AdDetectContext *s, const uint8_t *frame,
-                              const ad_detect_pixel_score_fn score_fn) {
+static void get_pixel_scores(const AdDetectContext *s, const uint8_t *frame,
+                             const ad_detect_pixel_score_fn *score_fn,
+                             const int score_fn_len, uint64_t *counter,
+                             double *result) {
   const int h = s->height;
   const int w = s->width;
-  uint64_t counter = 0;
+
+  for (int i = 0; i < score_fn_len; ++i) {
+    counter[i] = 0;
+  }
 
   const uint8_t *p = &frame[0];
-  for (int y = 0, pixel_index = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x, ++pixel_index) {
-      counter += score_fn(s, p[pixel_index]);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x, ++p) {
+      for (int i = 0; i < score_fn_len; ++i) {
+        counter[i] += score_fn[i](s, *p);
+      }
     }
   }
 
-  return (counter * 1.0) / (w * h);
+  for (int i = 0; i < score_fn_len; ++i) {
+    result[i] = (counter[i] * 1.0) / (w * h);
+  }
 }
 
 static int filter_audio_frame(AVFilterLink *inlink, AVFrame *frame) {
@@ -493,6 +583,11 @@ static int filter_audio_frame(AVFilterLink *inlink, AVFrame *frame) {
 
 static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   static double audio_levels[32];
+  static uint64_t pixel_counters[2];
+  static double pixel_results[2];
+  static ad_detect_pixel_score_fn pixel_score_fn[] = {get_black_score,
+                                                      get_white_score};
+
   AVFilterContext *ctx = inlink->dst;
   AdDetectContext *s = ctx->priv;
 
@@ -520,10 +615,14 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
     const double pts = frame->pts * av_q2d(s->video_time_base);
     const double scene_score = simple_encode(
         pts, &encode_index, get_scene_score(s, s->frame, s->prev_frame));
-    const double black_score = simple_encode(
-        pts, &encode_index, get_pixel_score(s, s->frame, get_black_score));
-    const double white_score = simple_encode(
-        pts, &encode_index, get_pixel_score(s, s->frame, get_white_score));
+
+    get_pixel_scores(s, s->frame, pixel_score_fn, 2, pixel_counters,
+                     pixel_results);
+
+    const double black_score =
+        simple_encode(pts, &encode_index, pixel_results[0]);
+    const double white_score =
+        simple_encode(pts, &encode_index, pixel_results[1]);
     const double silence_duration =
         simple_encode(pts, &encode_index, s->current_silence_duration);
 
