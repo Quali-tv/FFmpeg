@@ -1,1 +1,1 @@
-./configure --enable-libx264 --enable-gpl --disable-asm --extra-ldflags="-lstdc++ -lprotobuf -lgrpc++ -lgrpc -lkoku -llicensepp" --extra-cxxflags="-std=c++11" --extra-cflags="-fno-stack-check" && make -j 8
+./configure --enable-libx264 --enable-gpl --disable-asm --extra-ldflags="-lstdc++ -lprotobuf -lgrpc++ -lgrpc -lkoku -llicensepp -lkao" --extra-cxxflags="-std=c++11" --extra-cflags="-fno-stack-check" && make -j 8

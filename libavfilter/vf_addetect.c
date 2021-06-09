@@ -24,6 +24,7 @@
  */
 
 #include <float.h>
+#include <kao/kao.h>
 #include <koku/koku.h>
 #include <license++/license-c-bindings.h>
 #include <math.h>
@@ -66,6 +67,10 @@ typedef struct AdDetectContext {
   void *koku_ctx;
   int koku_index;
   int transmit_threshold;
+
+  void *kao_ctx;
+  int max_kao_wait_time;
+  int max_kao_distance;
 
   AVRational video_time_base;
 
@@ -164,6 +169,22 @@ static const AVOption addetect_options[] = {
      OFFSET(overwrite_existing_data),
      AV_OPT_TYPE_BOOL,
      {.i64 = 0},
+     0,
+     1,
+     FLAGS},
+    {"max_kao_wait_time",
+     "max time to wait for a kao frame to be processed in milliseconds",
+     OFFSET(max_kao_wait_time),
+     AV_OPT_TYPE_UINT64,
+     {.i64 = 10},
+     0,
+     5000,
+     FLAGS},
+    {"max_kao_distance",
+     "max distance to determine if a kao face is clustered with another",
+     OFFSET(max_kao_distance),
+     AV_OPT_TYPE_DOUBLE,
+     {.i64 = .6},
      0,
      1,
      FLAGS},
@@ -480,8 +501,13 @@ static int config_video_input(AVFilterLink *inlink) {
   s->koku_ctx =
       Koku_create(s->server_address, s->server_port, s->application_id,
                   s->session_id, s->context_id, s->overwrite_existing_data);
-
   if (!s->koku_ctx) return AVERROR(EINVAL);
+
+  s->kao_ctx =
+      Kao_create(s->server_address, s->server_port, s->application_id,
+                 s->session_id, s->context_id, s->overwrite_existing_data,
+                 s->max_kao_wait_time, s->max_kao_distance);
+  if (!s->kao_ctx) return AVERROR(EINVAL);
 
   av_log(s, AV_LOG_INFO,
          "server address: %s, server port: %d, application id: %s, session id: "
@@ -659,7 +685,7 @@ static void addetect_uninit(AVFilterContext *ctx) {
   if (ctx) {
     AdDetectContext *s = ctx->priv;
     if (s && s->koku_ctx) {
-      Koku_transmit_scene_detection_info(s->koku_ctx);
+      Koku_delete(s->koku_ctx);
     }
   }
 }
