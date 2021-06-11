@@ -601,16 +601,16 @@ static void scene_detect_uninit(AVFilterContext *ctx) {
 
 static const AVFilterPad scene_detect_inputs[] = {
     {
-        .name = "default_audio",
-        .type = AVMEDIA_TYPE_AUDIO,
-        .config_props = config_audio_input,
-        .filter_frame = filter_audio_frame,
-    },
-    {
         .name = "default_video",
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = config_video_input,
         .filter_frame = filter_video_frame,
+    },
+    {
+        .name = "default_audio",
+        .type = AVMEDIA_TYPE_AUDIO,
+        .config_props = config_audio_input,
+        .filter_frame = filter_audio_frame,
     },
     {NULL}};
 

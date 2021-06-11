@@ -132,7 +132,7 @@ static const AVOption spotz_face_detect_options[] = {
 AVFILTER_DEFINE_CLASS(spotz_face_detect);
 
 static int query_formats(AVFilterContext *ctx) {
-  static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,
+  static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_RGB24,
                                                 AV_PIX_FMT_NONE};
 
   AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
@@ -166,9 +166,9 @@ static int config_video_input(AVFilterLink *inlink) {
   if (!s->session_id) return AVERROR(EINVAL);
   if (!s->context_id) return AVERROR(EINVAL);
 
-  s->kao_ctx = Kao_create(s->server_address, s->server_port, s->application_id,
-                          s->session_id, s->context_id,
-                          s->overwrite_existing_data, s->max_kao_wait_time);
+  s->kao_ctx = NULL;//Kao_create(s->server_address, s->server_port,
+                      //        s->application_id, s->session_id, s->context_id,
+                        //      s->overwrite_existing_data, s->max_kao_wait_time);
   if (!s->kao_ctx) return AVERROR(EINVAL);
 
   av_log(s, AV_LOG_INFO,
@@ -191,7 +191,7 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   const int w = frame->width;
   const double pts = frame->pts * av_q2d(s->video_time_base);
 
-  Kao_process_faces(s->kao_ctx, pts, NULL, 0, 0);
+  // Kao_process_faces(s->kao_ctx, pts, NULL, 0, 0);
 
   return ff_filter_frame(ctx->outputs[0], frame);
 }
@@ -215,7 +215,11 @@ static const AVFilterPad face_detect_inputs[] = {
     {NULL}};
 
 static const AVFilterPad face_detect_outputs[] = {
-    {.name = "default", .type = AVMEDIA_TYPE_VIDEO}, {NULL}};
+    {
+        .name = "default",
+        .type = AVMEDIA_TYPE_VIDEO,
+    },
+    {NULL}};
 
 AVFilter ff_vf_spotz_face_detect = {
     .name = "spotz_face_detect",
@@ -226,4 +230,5 @@ AVFilter ff_vf_spotz_face_detect = {
     .outputs = face_detect_outputs,
     .uninit = face_detect_uninit,
     .priv_class = &spotz_face_detect_class,
+    .flags = AVFILTER_FLAG_SLICE_THREADS,
 };
