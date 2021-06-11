@@ -26,6 +26,7 @@
 #include "vf_spotz_license.h"
 
 #include <license++/license-c-bindings.h>
+#include <time.h>
 
 static const unsigned char license_manager_signature_key[] = {
     0x5B, 0x6A, 0xF5, 0x93, 0xED, 0xAB, 0xB3, 0x10,
@@ -55,8 +56,7 @@ static av_always_inline const char *date_to_string(time_t dt) {
   return buffer;
 }
 
-static av_always_inline int check_license(void *s, const char *license,
-                                          const char *application_id) {
+int check_license(void *s, const char *license, const char *application_id) {
   license_key_register_init(license_manager_signature_key, authorities);
 
   const void *lm = license_manager_create();

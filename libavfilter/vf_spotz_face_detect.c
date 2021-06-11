@@ -55,14 +55,14 @@ typedef struct FaceDetectContext {
   int max_kao_distance;
 
   AVRational video_time_base;
-  int w, h, bit_depth, linesize;
+  int width, height, bit_depth, linesize;
   int video_format;
 } FaceDetectContext;
 
 #define OFFSET(x) offsetof(FaceDetectContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
-static const AVOption face_detect_options[] = {
+static const AVOption spotz_face_detect_options[] = {
     {"license",
      "set kao license",
      OFFSET(license),
@@ -154,8 +154,8 @@ static int config_video_input(AVFilterLink *inlink) {
   const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
 
   s->bit_depth = desc->comp[0].depth;
-  s->w = inlink->w;
-  s->h = inlink->h;
+  s->width = inlink->w;
+  s->height = inlink->h;
   s->video_format = inlink->format;
   s->linesize = av_image_get_linesize(inlink->format, inlink->w, 0);
   s->video_time_base = inlink->time_base;

@@ -110,7 +110,7 @@ typedef int (*scene_detect_pixel_score_fn)(const SceneDetectContext *s,
 #define OFFSET(x) offsetof(SceneDetectContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
-static const AVOption scene_detect_options[] = {
+static const AVOption spotz_scene_detect_options[] = {
     {"license",
      "set koku license",
      OFFSET(license),
