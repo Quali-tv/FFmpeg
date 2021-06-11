@@ -132,7 +132,7 @@ static const AVOption spotz_face_detect_options[] = {
 AVFILTER_DEFINE_CLASS(spotz_face_detect);
 
 static int query_formats(AVFilterContext *ctx) {
-  static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_RGB24,
+  static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,
                                                 AV_PIX_FMT_NONE};
 
   AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
@@ -166,9 +166,9 @@ static int config_video_input(AVFilterLink *inlink) {
   if (!s->session_id) return AVERROR(EINVAL);
   if (!s->context_id) return AVERROR(EINVAL);
 
-  s->kao_ctx = NULL;//Kao_create(s->server_address, s->server_port,
-                      //        s->application_id, s->session_id, s->context_id,
-                        //      s->overwrite_existing_data, s->max_kao_wait_time);
+  s->kao_ctx = Kao_create(s->server_address, s->server_port, s->application_id,
+                          s->session_id, s->context_id,
+                          s->overwrite_existing_data, s->max_kao_wait_time);
   if (!s->kao_ctx) return AVERROR(EINVAL);
 
   av_log(s, AV_LOG_INFO,
