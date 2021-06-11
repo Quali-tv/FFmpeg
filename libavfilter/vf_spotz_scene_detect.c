@@ -20,13 +20,11 @@
 
 /**
  * @file
- * Video ad range detector
+ * Video scene detector
  */
 
 #include <float.h>
-#include <kao/kao.h>
 #include <koku/koku.h>
-#include <license++/license-c-bindings.h>
 #include <math.h>
 #include <time.h>
 
@@ -39,6 +37,7 @@
 #include "libavutil/timestamp.h"
 #include "libavutil/tree.h"
 #include "scene_sad.h"
+#include "vf_spotz_license.h"
 
 #define MIP_MAP_SIZE 4
 
@@ -50,7 +49,7 @@ typedef struct AudioLevelContext {
   double delta2;
 } AudioLevelContext;
 
-typedef struct AdDetectContext {
+typedef struct SceneDetectContext {
   const AVClass *class;
 
   // configuration
@@ -68,10 +67,6 @@ typedef struct AdDetectContext {
   int koku_index;
   int transmit_threshold;
 
-  void *kao_ctx;
-  int max_kao_wait_time;
-  int max_kao_distance;
-
   AVRational video_time_base;
 
   // silence detection
@@ -88,7 +83,7 @@ typedef struct AdDetectContext {
 
   int64_t frame_end;
 
-  void (*silence_detect)(struct AdDetectContext *s, AVFrame *frame,
+  void (*silence_detect)(struct SceneDetectContext *s, AVFrame *frame,
                          int nb_samples, int sample_rate, AVRational time_base);
 
   // scene detection
@@ -107,15 +102,15 @@ typedef struct AdDetectContext {
   uint8_t *free_frame;
   uint16_t *acc_frame;
   double prev_mafd;
-} AdDetectContext;
+} SceneDetectContext;
 
-typedef int (*ad_detect_pixel_score_fn)(const AdDetectContext *s,
-                                        const uint8_t pixel);
+typedef int (*scene_detect_pixel_score_fn)(const SceneDetectContext *s,
+                                           const uint8_t pixel);
 
-#define OFFSET(x) offsetof(AdDetectContext, x)
+#define OFFSET(x) offsetof(SceneDetectContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
 
-static const AVOption addetect_options[] = {
+static const AVOption scene_detect_options[] = {
     {"license",
      "set koku license",
      OFFSET(license),
@@ -172,22 +167,6 @@ static const AVOption addetect_options[] = {
      0,
      1,
      FLAGS},
-    {"max_kao_wait_time",
-     "max time to wait for a kao frame to be processed in milliseconds",
-     OFFSET(max_kao_wait_time),
-     AV_OPT_TYPE_UINT64,
-     {.i64 = 10},
-     0,
-     5000,
-     FLAGS},
-    {"max_kao_distance",
-     "max distance to determine if a kao face is clustered with another",
-     OFFSET(max_kao_distance),
-     AV_OPT_TYPE_DOUBLE,
-     {.i64 = .6},
-     0,
-     1,
-     FLAGS},
     {"black_threshold",
      "set blackness threshold",
      OFFSET(black_threshold),
@@ -214,71 +193,7 @@ static const AVOption addetect_options[] = {
      FLAGS},
     {NULL}};
 
-AVFILTER_DEFINE_CLASS(addetect);
-
-static const unsigned char license_manager_signature_key[] = {
-    0x5B, 0x6A, 0xF5, 0x93, 0xED, 0xAB, 0xB3, 0x10,
-    0xF5, 0xBE, 0x00, 0xE6, 0x4F, 0x1B, 0x70, 0xC8};
-
-static const IssuingAuthorityParameters authorities[] = {
-    {"sample-license-authority", "Sample License Authority",
-     /*key pair*/ NULL,
-     /*private key*/ "",
-     "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklEQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ"
-     "0FRMEFNSUlCQ0FLQ0FRRUF0eGdKUENWSUhQanhWamcwNWUydQpaNURqNDNIdDF0WFlUK3VkVV"
-     "RTL3RrSlgyQzltcWg4aktQdU9mQXV6cWJQK2V6ckF0Q0hDem1ETmxmRTBqZU5TClVUZlFWbFh"
-     "xNzd3UGh6ajZWNm1lWTNlcmYxK0pUY0dROTVDRTdBbFFmaW9ObVoxTU45MFI5ejZCWUkwUmlU"
-     "eHUKQVFXckZqdm1rMUsrZ1RRN2dPbVV1WEx1MzJ2R2k1UTRwSUpUcEkwTFhCSnlCclU0SzVlN"
-     "1ZNWFowdCtvV1Fzdwpjcm05bkJYWVpleVRJcUZ2VmVkbEpxZTArTm9GTzN4T3VUdjFKK2Jxa1"
-     "Z4UW5CVzNDZ3JHa2NPRlZFa0RDRE44CkZoZ0N5SEpJRDliZkdsNlBJUEp0TE94UlF2M21KK25"
-     "qS01ycXlrcE9panpZc3JSNFJZeURXTDZ2bWEyWlJkaVkKS1FJQkVRPT0KLS0tLS1FTkQgUFVC"
-     "TElDIEtFWS0tLS0tCg==",
-     87600U, 1}};
-
-static av_always_inline const char *date_to_string(time_t dt) {
-  static char buffer[512];
-  struct tm *info;
-
-  info = localtime(&dt);
-  strftime(buffer, 80, "%x - %I:%M%p", info);
-  return buffer;
-}
-
-static av_always_inline int check_license(AdDetectContext *s) {
-  license_key_register_init(license_manager_signature_key, authorities);
-
-  const void *lm = license_manager_create();
-  if (!lm) {
-    return -10;
-  }
-
-  void *l = license_create();
-  if (!l) {
-    return -20;
-  }
-
-  if (!license_load(l, s->license)) {
-    return -30;
-  }
-
-  av_log(s, AV_LOG_INFO, "Licensing Authority: %s\n",
-         license_get_issuing_authority_id(l));
-  av_log(s, AV_LOG_INFO, "Issued To: %s\n", license_get_licensee(l));
-  av_log(s, AV_LOG_INFO, "Issued On: %s\n",
-         date_to_string(license_get_issue_date(l)));
-  av_log(s, AV_LOG_INFO, "Expires On: %s\n",
-         date_to_string(license_get_expiry_date(l)));
-
-  if (!license_manager_validate(lm, l, 0, "")) {
-    return -40;
-  }
-
-  if (strcmp(license_get_licensee(l), s->application_id)) {
-    return -50;
-  }
-
-  return 0;
-}
+AVFILTER_DEFINE_CLASS(spotz_scene_detect);
 
 static av_always_inline double simple_encode(const double pts, int *index,
                                              double val) {
@@ -291,7 +206,7 @@ static av_always_inline double simple_encode(const double pts, int *index,
   return val;
 }
 
-static av_always_inline void audio_level_reset(AdDetectContext *s) {
+static av_always_inline void audio_level_reset(SceneDetectContext *s) {
   for (int i = 0; i < s->nb_channels; ++i) {
     AudioLevelContext *a = &s->audio_levels[i];
     a->count = 0;
@@ -302,7 +217,7 @@ static av_always_inline void audio_level_reset(AdDetectContext *s) {
   }
 }
 
-static av_always_inline void audio_level_update(AdDetectContext *s,
+static av_always_inline void audio_level_update(SceneDetectContext *s,
                                                 const double sample,
                                                 const int current_sample) {
   int channel = current_sample % s->nb_channels;
@@ -314,9 +229,9 @@ static av_always_inline void audio_level_update(AdDetectContext *s,
   a->m2 += a->delta * a->delta2;
 }
 
-static av_always_inline void silence_update(AdDetectContext *s, AVFrame *frame,
-                                            int is_silence, int current_sample,
-                                            int sample_rate,
+static av_always_inline void silence_update(SceneDetectContext *s,
+                                            AVFrame *frame, int is_silence,
+                                            int current_sample, int sample_rate,
                                             AVRational time_base) {
   int channel = current_sample % s->nb_channels;
   if (is_silence) {
@@ -339,24 +254,24 @@ static av_always_inline void silence_update(AdDetectContext *s, AVFrame *frame,
   }
 }
 
-#define SILENCE_DETECT(name, type)                                       \
-  static void silence_detect_##name(AdDetectContext *s, AVFrame *frame,  \
-                                    int nb_samples, int sample_rate,     \
-                                    AVRational time_base) {              \
-    const type *p = (const type *)frame->data[0];                        \
-    const type noise = s->noise;                                         \
-    int i;                                                               \
-                                                                         \
-    if (s->audio_levels_need_reset) {                                    \
-      audio_level_reset(s);                                              \
-      s->audio_levels_need_reset = 0;                                    \
-    }                                                                    \
-                                                                         \
-    for (i = 0; i < nb_samples; i++, p++) {                              \
-      audio_level_update(s, (double)*p, i);                              \
-      silence_update(s, frame, *p<noise && * p> - noise, i, sample_rate, \
-                     time_base);                                         \
-    }                                                                    \
+#define SILENCE_DETECT(name, type)                                         \
+  static void silence_detect_##name(SceneDetectContext *s, AVFrame *frame, \
+                                    int nb_samples, int sample_rate,       \
+                                    AVRational time_base) {                \
+    const type *p = (const type *)frame->data[0];                          \
+    const type noise = s->noise;                                           \
+    int i;                                                                 \
+                                                                           \
+    if (s->audio_levels_need_reset) {                                      \
+      audio_level_reset(s);                                                \
+      s->audio_levels_need_reset = 0;                                      \
+    }                                                                      \
+                                                                           \
+    for (i = 0; i < nb_samples; i++, p++) {                                \
+      audio_level_update(s, (double)*p, i);                                \
+      silence_update(s, frame, *p<noise && * p> - noise, i, sample_rate,   \
+                     time_base);                                           \
+    }                                                                      \
   }
 
 SILENCE_DETECT(dbl, double)
@@ -393,7 +308,7 @@ static int query_formats(AVFilterContext *ctx) {
 
 static int config_audio_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
-  AdDetectContext *s = ctx->priv;
+  SceneDetectContext *s = ctx->priv;
 
   s->nb_samples = FFMAX(1, inlink->sample_rate);
   s->nb_channels = inlink->channels;
@@ -450,10 +365,10 @@ static int config_audio_input(AVFilterLink *inlink) {
 
 static int config_video_input(AVFilterLink *inlink) {
   AVFilterContext *ctx = inlink->dst;
-  AdDetectContext *s = ctx->priv;
+  SceneDetectContext *s = ctx->priv;
   int r;
 
-  r = check_license(s);
+  r = check_license(s, s->license, s->application_id);
   if (r) {
     av_log(s, AV_LOG_ERROR, "Failed to validate license. Reason: %d\n", r);
     return AVERROR(EINVAL);
@@ -503,12 +418,6 @@ static int config_video_input(AVFilterLink *inlink) {
                   s->session_id, s->context_id, s->overwrite_existing_data);
   if (!s->koku_ctx) return AVERROR(EINVAL);
 
-  s->kao_ctx =
-      Kao_create(s->server_address, s->server_port, s->application_id,
-                 s->session_id, s->context_id, s->overwrite_existing_data,
-                 s->max_kao_wait_time, s->max_kao_distance);
-  if (!s->kao_ctx) return AVERROR(EINVAL);
-
   av_log(s, AV_LOG_INFO,
          "server address: %s, server port: %d, application id: %s, session id: "
          "%s, context id: "
@@ -522,7 +431,7 @@ static int config_video_input(AVFilterLink *inlink) {
   return 0;
 }
 
-static double get_scene_score(AdDetectContext *s, uint8_t *frame,
+static double get_scene_score(SceneDetectContext *s, uint8_t *frame,
                               uint8_t *prev_frame) {
   uint64_t sad = 0;
   const int linesize = s->width;
@@ -541,16 +450,16 @@ static double get_scene_score(AdDetectContext *s, uint8_t *frame,
   return score;
 }
 
-static int get_black_score(const AdDetectContext *s, const uint8_t pixel) {
+static int get_black_score(const SceneDetectContext *s, const uint8_t pixel) {
   return pixel <= s->black_threshold;
 }
 
-static int get_white_score(const AdDetectContext *s, const uint8_t pixel) {
+static int get_white_score(const SceneDetectContext *s, const uint8_t pixel) {
   return pixel >= s->white_threshold;
 }
 
-static void get_pixel_scores(const AdDetectContext *s, const uint8_t *frame,
-                             const ad_detect_pixel_score_fn *score_fn,
+static void get_pixel_scores(const SceneDetectContext *s, const uint8_t *frame,
+                             const scene_detect_pixel_score_fn *score_fn,
                              const int score_fn_len, uint64_t *counter,
                              double *result) {
   const int h = s->height;
@@ -576,7 +485,7 @@ static void get_pixel_scores(const AdDetectContext *s, const uint8_t *frame,
 
 static int filter_audio_frame(AVFilterLink *inlink, AVFrame *frame) {
   AVFilterContext *ctx = inlink->dst;
-  AdDetectContext *s = ctx->priv;
+  SceneDetectContext *s = ctx->priv;
 
   const int nb_channels = inlink->channels;
   const int srate = inlink->sample_rate;
@@ -611,11 +520,11 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   static double audio_levels[32];
   static uint64_t pixel_counters[2];
   static double pixel_results[2];
-  static ad_detect_pixel_score_fn pixel_score_fn[] = {get_black_score,
-                                                      get_white_score};
+  static scene_detect_pixel_score_fn pixel_score_fn[] = {get_black_score,
+                                                         get_white_score};
 
   AVFilterContext *ctx = inlink->dst;
-  AdDetectContext *s = ctx->priv;
+  SceneDetectContext *s = ctx->priv;
 
   {
     const int h = frame->height;
@@ -681,16 +590,16 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   }
 }
 
-static void addetect_uninit(AVFilterContext *ctx) {
+static void scene_detect_uninit(AVFilterContext *ctx) {
   if (ctx) {
-    AdDetectContext *s = ctx->priv;
+    SceneDetectContext *s = ctx->priv;
     if (s && s->koku_ctx) {
       Koku_delete(s->koku_ctx);
     }
   }
 }
 
-static const AVFilterPad addetect_inputs[] = {
+static const AVFilterPad scene_detect_inputs[] = {
     {
         .name = "default_audio",
         .type = AVMEDIA_TYPE_AUDIO,
@@ -705,15 +614,15 @@ static const AVFilterPad addetect_inputs[] = {
     },
     {NULL}};
 
-static const AVFilterPad addetect_outputs[] = {{NULL}};
+static const AVFilterPad scene_detect_outputs[] = {{NULL}};
 
-AVFilter ff_vf_addetect = {
-    .name = "addetect",
-    .description = NULL_IF_CONFIG_SMALL("Detect ad video intervals."),
-    .priv_size = sizeof(AdDetectContext),
+AVFilter ff_vf_spotz_scene_detect = {
+    .name = "spotz_scene_detect",
+    .description = NULL_IF_CONFIG_SMALL("Detect video scenes."),
+    .priv_size = sizeof(SceneDetectContext),
     .query_formats = query_formats,
-    .inputs = addetect_inputs,
-    .outputs = addetect_outputs,
-    .uninit = addetect_uninit,
-    .priv_class = &addetect_class,
+    .inputs = scene_detect_inputs,
+    .outputs = scene_detect_outputs,
+    .uninit = scene_detect_uninit,
+    .priv_class = &spotz_scene_detect_class,
 };

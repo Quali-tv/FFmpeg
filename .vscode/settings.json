@@ -1,5 +1,4 @@
 {
-    "editor.formatOnSave": true,
     "C_Cpp.clang_format_fallbackStyle": "Google",
     "C_Cpp.clang_format_style": "Google",
     "files.associations": {
@@ -29,5 +28,7 @@
         "array": "c",
         "istream": "c",
         "locale": "c"
-    }
+    },
+    "editor.formatOnSave": true,
+    "clang-format.fallbackStyle": "Google"
 }
