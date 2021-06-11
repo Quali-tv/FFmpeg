@@ -290,7 +290,8 @@ static int query_formats(AVFilterContext *ctx) {
   AVFilterChannelLayouts *layouts = NULL;
   int ret = AVERROR(EINVAL);
 
-  formats = ff_make_format_list(sample_fmts);
+  // formats = ff_make_format_list(sample_fmts);
+  formats = ff_all_formats(AVMEDIA_TYPE_AUDIO);
   if ((ret = ff_formats_ref(formats, &inlink->outcfg.formats)) < 0 ||
       (layouts = ff_all_channel_counts()) == NULL ||
       (ret = ff_channel_layouts_ref(layouts, &inlink->outcfg.channel_layouts)) <

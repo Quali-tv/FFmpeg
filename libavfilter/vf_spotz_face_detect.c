@@ -193,7 +193,12 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
 
   // Kao_process_faces(s->kao_ctx, pts, NULL, 0, 0);
 
-  return ff_filter_frame(ctx->outputs[0], frame);
+  if (ctx->nb_outputs > 0) {
+    return ff_filter_frame(ctx->outputs[0], frame);
+  } else {
+    av_frame_free(&frame);
+    return 0;
+  }
 }
 
 static void face_detect_uninit(AVFilterContext *ctx) {
@@ -207,7 +212,7 @@ static void face_detect_uninit(AVFilterContext *ctx) {
 
 static const AVFilterPad face_detect_inputs[] = {
     {
-        .name = "default_video",
+        .name = "default video",
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = config_video_input,
         .filter_frame = filter_video_frame,
@@ -216,7 +221,7 @@ static const AVFilterPad face_detect_inputs[] = {
 
 static const AVFilterPad face_detect_outputs[] = {
     {
-        .name = "default",
+        .name = "default video",
         .type = AVMEDIA_TYPE_VIDEO,
     },
     {NULL}};
