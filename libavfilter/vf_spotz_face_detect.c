@@ -191,7 +191,7 @@ static int filter_video_frame(AVFilterLink *inlink, AVFrame *frame) {
   const int w = frame->width;
   const double pts = frame->pts * av_q2d(s->video_time_base);
 
-  // Kao_process_faces(s->kao_ctx, pts, NULL, 0, 0);
+  Kao_process_faces(s->kao_ctx, pts, frame->data[0], w, h);
 
   if (ctx->nb_outputs > 0) {
     return ff_filter_frame(ctx->outputs[0], frame);
